@@ -9,12 +9,9 @@ FoxyApply runs a real browser, fills out applications with your info, and submit
 ## Quick Start
 
 ```bash
-# Download the latest release
-# https://github.com/youruser/foxyapply/releases
-
 # Or build from source
 go install github.com/wailsapp/wails/v3/cmd/wails3@latest
-git clone https://github.com/youruser/foxyapply && cd foxyapply
+git clone https://github.com/pypesdev/foxyapply && cd foxyapply
 wails3 build
 ```
 
