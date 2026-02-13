@@ -38,6 +38,12 @@ jobs:
       - name: Build + package .app bundle
         run: wails3 task darwin:package
 
+      - name: Bundle bot binary into .app
+        run: |
+          APP="build/darwin/bin/foxyapply.app"
+          mkdir -p "$APP/Contents/MacOS/resources"
+          cp build/darwin/resources/easyapplybot "$APP/Contents/MacOS/resources/"
+
       - name: Codesign
         env:
           MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
@@ -57,11 +63,10 @@ jobs:
           security import certificate.p12 -k build.keychain -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$MACOS_CERTIFICATE_PASSWORD" build.keychain
 
-          # Sign bot binary first
-          BOT="bin/foxyapply.app/Contents/Resources/easyapplybot"
-          if [ ! -f "$BOT" ]; then
-            BOT="build/darwin/resources/easyapplybot"
-          fi
+          APP="build/darwin/bin/foxyapply.app"
+
+          # Sign bot binary first (inside .app at Contents/MacOS/resources/)
+          BOT="$APP/Contents/MacOS/resources/easyapplybot"
           if [ -f "$BOT" ]; then
             codesign --force --options runtime --timestamp -s "$MACOS_SIGN_IDENTITY" "$BOT" -v
           fi
@@ -69,8 +74,8 @@ jobs:
           # Sign the .app bundle
           codesign --force --deep --options runtime --timestamp \
             -s "$MACOS_SIGN_IDENTITY" \
-            "bin/foxyapply.app" -v
-          codesign --verify --deep --strict --verbose=2 "bin/foxyapply.app"
+            "$APP" -v
+          codesign --verify --deep --strict --verbose=2 "$APP"
 
       - name: Notarize + staple
         env:
@@ -83,9 +88,12 @@ jobs:
             exit 0
           fi
 
-          ditto -c -k --sequesterRsrc --keepParent "bin/foxyapply.app" "bin/FoxyApply-macOS.zip"
+          APP="build/darwin/bin/foxyapply.app"
+          ZIP="build/darwin/bin/FoxyApply-macOS.zip"
 
-          SUBMIT_JSON="$(xcrun notarytool submit "bin/FoxyApply-macOS.zip" \
+          ditto -c -k --sequesterRsrc --keepParent "$APP" "$ZIP"
+
+          SUBMIT_JSON="$(xcrun notarytool submit "$ZIP" \
             --apple-id "$APPLE_ID" \
             --password "$APPLE_APP_PASSWORD" \
             --team-id "$APPLE_TEAM_ID" \
@@ -101,25 +109,25 @@ jobs:
 
           # Staple with retries for CloudKit propagation
           for i in 1 2 3 4 5; do
-            if xcrun stapler staple "bin/foxyapply.app"; then break; fi
+            if xcrun stapler staple "$APP"; then break; fi
             echo "Staple attempt $i failed, retrying..."
             sleep $((i*10))
           done
 
           # Re-zip with stapled ticket
-          rm -f "bin/FoxyApply-macOS.zip"
-          ditto -c -k --sequesterRsrc --keepParent "bin/foxyapply.app" "bin/FoxyApply-macOS.zip"
+          rm -f "$ZIP"
+          ditto -c -k --sequesterRsrc --keepParent "$APP" "$ZIP"
 
       - name: Create zip (unsigned fallback)
         run: |
-          if [ ! -f "bin/FoxyApply-macOS.zip" ]; then
-            ditto -c -k --sequesterRsrc --keepParent "bin/foxyapply.app" "bin/FoxyApply-macOS.zip"
+          if [ ! -f "build/darwin/bin/FoxyApply-macOS.zip" ]; then
+            ditto -c -k --sequesterRsrc --keepParent "build/darwin/bin/foxyapply.app" "build/darwin/bin/FoxyApply-macOS.zip"
           fi
 
       - uses: actions/upload-artifact@v4
         with:
           name: release-macos
-          path: bin/FoxyApply-macOS.zip
+          path: build/darwin/bin/FoxyApply-macOS.zip
 
   # ──────────────────────────────────────────────────────────────────
   # Windows — build + NSIS installer
@@ -159,16 +167,21 @@ jobs:
           choco install nsis -y
           echo "C:\Program Files (x86)\NSIS" >> $env:GITHUB_PATH
 
+      - name: Copy bot binary next to exe
+        run: |
+          mkdir -p build/windows/bin/resources
+          Copy-Item build/windows/resources/easyapplybot.exe build/windows/bin/resources/
+
       - name: Build + create NSIS installer
         run: wails3 task windows:package
 
       - name: Rename installer
         run: |
-          $nsis = Get-ChildItem -Path "build/windows/nsis" -Filter "*installer*" -Recurse | Select-Object -First 1
+          $nsis = Get-ChildItem -Path "bin" -Filter "*installer*" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
           if ($nsis) {
             Copy-Item $nsis.FullName "bin/FoxyApply-Windows-Setup.exe"
           } else {
-            Copy-Item "bin/foxyapply.exe" "bin/FoxyApply-Windows-Setup.exe"
+            Copy-Item "build/windows/bin/foxyapply.exe" "bin/FoxyApply-Windows-Setup.exe"
           }
 
       - uses: actions/upload-artifact@v4
@@ -223,7 +236,7 @@ jobs:
           if [ -n "$APPIMAGE" ]; then
             cp "$APPIMAGE" "bin/FoxyApply-Linux.AppImage"
           else
-            cp bin/foxyapply "bin/FoxyApply-Linux.AppImage"
+            cp build/linux/bin/foxyapply "bin/FoxyApply-Linux.AppImage"
           fi
 
       - uses: actions/upload-artifact@v4
