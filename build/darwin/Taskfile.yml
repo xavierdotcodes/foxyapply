@@ -157,7 +157,18 @@ tasks:
     cmds:
       - 'echo "Skipping codesign (not available on {{OS}}). Sign the .app on macOS before distribution."'
 
+  build:bot:
+    summary: Builds the Python bot binary with PyInstaller
+    cmds:
+      - pyinstaller easyapplybot.spec --distpath "{{.BIN_DIR}}/{{.APP_NAME}}.dev.app/Contents/MacOS/" --workpath build/easyapplybot --noconfirm
+    sources:
+      - easyapplybot.py
+    generates:
+      - "{{.BIN_DIR}}/{{.APP_NAME}}.dev.app/Contents/MacOS/easyapplybot"
+
   run:
+    deps:
+      - task: build:bot
     cmds:
       - mkdir -p "{{.BIN_DIR}}/{{.APP_NAME}}.dev.app/Contents/MacOS"
       - mkdir -p "{{.BIN_DIR}}/{{.APP_NAME}}.dev.app/Contents/Resources"

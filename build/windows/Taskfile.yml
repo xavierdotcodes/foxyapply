@@ -150,7 +150,18 @@ tasks:
     cmds:
       - wails3 tool msix-install-tools
 
+  build:bot:
+    summary: Builds the Python bot binary with PyInstaller
+    cmds:
+      - pyinstaller easyapplybot.spec --distpath "{{.BIN_DIR}}/resources/" --workpath build/easyapplybot --noconfirm
+    sources:
+      - easyapplybot.py
+    generates:
+      - "{{.BIN_DIR}}/resources/easyapplybot.exe"
+
   run:
+    deps:
+      - task: build:bot
     cmds:
       - '{{.BIN_DIR}}/{{.APP_NAME}}.exe'
 

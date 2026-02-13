@@ -5,13 +5,13 @@ version: "3"
 
 # This information is used to generate the build assets.
 info:
-  companyName: "Pypes" # The name of the company
-  productName: "FoxyApply" # The name of the application
-  productIdentifier: "com.mycompany.myproduct" # The unique product identifier
-  description: "A program that does X" # The application description
-  copyright: "(c) 2025, Pypes" # Copyright text
-  comments: "Some Product Comments" # Comments
-  version: "0.0.1" # The application version
+  companyName: "Pypes"
+  productName: "FoxyApply"
+  productIdentifier: "com.pypes.foxyapply"
+  description: "Automate your LinkedIn job applications"
+  copyright: "(c) 2025, Pypes"
+  comments: "LinkedIn Easy Apply automation tool"
+  version: "0.1.0"
 
 # iOS build configuration (uncomment to customise iOS project generation)
 # Note: Keys under `ios` OVERRIDE values under `info` when set.

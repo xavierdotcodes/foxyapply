@@ -111,8 +111,6 @@ def setup_logger() -> None:
     if not os.path.isdir(log_dir):
         os.makedirs(log_dir, exist_ok=True)
     logging.basicConfig(
-        filename=os.path.join(log_dir, dt + 'applyJobs.log'),
-        filemode='w',
         format='%(asctime)s::%(name)s::%(levelname)s::%(message)s',
         datefmt='%d-%b-%y %H:%M:%S',
     )

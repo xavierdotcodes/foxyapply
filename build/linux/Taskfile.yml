@@ -174,7 +174,18 @@ tasks:
       CATEGORIES: 'Development;'
       OUTPUTFILE: '{{.ROOT_DIR}}/build/linux/{{.APP_NAME}}.desktop'
 
+  build:bot:
+    summary: Builds the Python bot binary with PyInstaller
+    cmds:
+      - pyinstaller easyapplybot.spec --distpath "{{.BIN_DIR}}/resources/" --workpath build/easyapplybot --noconfirm
+    sources:
+      - easyapplybot.py
+    generates:
+      - "{{.BIN_DIR}}/resources/easyapplybot"
+
   run:
+    deps:
+      - task: build:bot
     cmds:
       - '{{.BIN_DIR}}/{{.APP_NAME}}'
 
