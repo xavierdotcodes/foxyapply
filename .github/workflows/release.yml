@@ -173,7 +173,9 @@ jobs:
           Copy-Item build/windows/resources/easyapplybot.exe build/windows/bin/resources/
 
       - name: Build + create NSIS installer
-        run: wails3 task windows:package
+        run: |
+          mkdir -p bin
+          wails3 task windows:package
 
       - name: Rename installer
         run: |
