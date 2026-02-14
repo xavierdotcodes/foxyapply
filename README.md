@@ -48,6 +48,10 @@ This project is built with [Wails 3](https://v3.wails.io/).
    go install github.com/wailsapp/wails/v3/cmd/wails3@latest
    ```
 ### Run in Development Mode
+```bash
+python3 -m venv venv
+source venv/bin/activate
+```
 
 ```bash
 wails3 dev
@@ -58,8 +62,27 @@ wails3 dev
 ```bash
 wails3 build
 ```
-
 The production executable will be created in the `build` directory.
+
+# Development
+
+### Activate python virtual environment
+`python3 -m venv venv`
+`source venv/bin/activate`
+On Windows use:
+`python -m venv venv`
+`venv\Scripts\activate`
+
+
+### Install dependencies:
+`pip install -r requirements.txt`
+
+### Run go unit tests
+`go test ./...`
+
+### to make changes to the easyapplybot.py
+rebuild the pyinstaller exe binary that places it in the build/ dir with:
+`wails3 dev`
 
 ## License
 

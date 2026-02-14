@@ -118,6 +118,7 @@ function App() {
         setError('Please select a LinkedIn profile to start applying.')
         return
       }
+      await SetApplying(true)
       await StartApplying(selectedProfile)
     } catch (e) {
       await SetApplying(false)

@@ -975,6 +975,7 @@ async def websocket_endpoint(ws: WebSocket):
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
+    print("Starting EasyApplyBot FastAPI server...")
     parser = argparse.ArgumentParser(description="EasyApplyBot FastAPI server")
     parser.add_argument("--port", type=int, default=8765, help="Port to listen on")
     parser.add_argument("--host", type=str, default="127.0.0.1", help="Host to bind to")
