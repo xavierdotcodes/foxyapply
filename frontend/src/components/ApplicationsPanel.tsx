@@ -365,6 +365,8 @@ export function ApplicationsPanel({
             setLocationInput={setLocationInput}
             addLocation={addLocation}
             removeLocation={removeLocation}
+            locationError={locationError}
+            setLocationError={setLocationError}
           />
         )}
       </div>
@@ -469,6 +471,8 @@ function JobPreferencesStep({
   setLocationInput,
   addLocation,
   removeLocation,
+  locationError,
+  setLocationError,
 }: {
   profileData: ProfileData
   updateField: <K extends keyof ProfileData>(field: K, value: ProfileData[K]) => void
@@ -480,6 +484,8 @@ function JobPreferencesStep({
   setLocationInput: (v: string) => void
   addLocation: () => void
   removeLocation: (i: number) => void
+  locationError: string | null
+  setLocationError: (v: string | null) => void
 }) {
   return (
     <div>
@@ -524,7 +530,7 @@ function JobPreferencesStep({
           <input
             type="text"
             value={locationInput}
-            onChange={(e) => setLocationInput(e.target.value)}
+            onChange={(e) => { setLocationInput(e.target.value); setLocationError(null) }}
             onKeyDown={(e) => e.key === 'Enter' && (e.preventDefault(), addLocation())}
             style={styles.tagInput}
             placeholder="e.g., San Francisco, CA"
@@ -533,6 +539,7 @@ function JobPreferencesStep({
             Add
           </button>
         </div>
+        {locationError && <span style={styles.fieldError}>{locationError}</span>}
         <div style={styles.tagList}>
           {profileData.locations.map((loc, index) => (
             <span key={index} style={styles.tag}>
@@ -543,7 +550,7 @@ function JobPreferencesStep({
             </span>
           ))}
         </div>
-        {profileData.locations.length === 0 && (
+        {profileData.locations.length === 0 && !locationError && (
           <span style={styles.hint}>Add at least one location</span>
         )}
       </div>
@@ -693,15 +700,16 @@ function SettingsView({
             <input
               type="text"
               value={locationInput}
-              onChange={(e) => setLocationInput(e.target.value)}
+              onChange={(e) => { setLocationInput(e.target.value); setLocationError(null) }}
               onKeyDown={(e) => e.key === 'Enter' && (e.preventDefault(), addLocation())}
               style={styles.tagInput}
-              placeholder="e.g., San Francisco, CA"
+              placeholder="e.g., San Francisco, California"
             />
             <button onClick={addLocation} style={styles.addBtn}>
               Add
             </button>
           </div>
+          {locationError && <span style={styles.fieldError}>{locationError}</span>}
           <div style={styles.tagList}>
             {profileData.locations.map((loc, index) => (
               <span key={index} style={styles.tag}>
@@ -1129,6 +1137,12 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'block',
     fontSize: '12px',
     color: '#666',
+    marginTop: '6px',
+  },
+  fieldError: {
+    display: 'block',
+    fontSize: '12px',
+    color: '#e74c3c',
     marginTop: '6px',
   },
   row: {
