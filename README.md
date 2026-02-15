@@ -48,9 +48,27 @@ This project is built with [Wails 3](https://v3.wails.io/).
    go install github.com/wailsapp/wails/v3/cmd/wails3@latest
    ```
 ### Run in Development Mode
+### Activate python virtual environment
 ```bash
 python3 -m venv venv
+```
+```bash
 source venv/bin/activate
+```
+On Windows use:
+```bash
+python -m venv venv
+```bash
+venv\Scripts\activate
+```
+
+```
+source venv/bin/activate
+```
+
+### Install python dependencies
+```
+pip install -r requirements.txt
 ```
 
 ```bash
@@ -64,21 +82,19 @@ wails3 build
 ```
 The production executable will be created in the `build` directory.
 
-# Development
 
-### Activate python virtual environment
-`python3 -m venv venv`
-`source venv/bin/activate`
-On Windows use:
-`python -m venv venv`
-`venv\Scripts\activate`
+## Troubleshooting
+
+# wails3 dev hangs after generating bindings
+- ctrl+c will show you error - make sure to install requirements with `pip install -r requirements.txt` and make sure pyinstaller is in $PATH
 
 
-### Install dependencies:
-`pip install -r requirements.txt`
+### Testing
 
 ### Run go unit tests
-`go test ./...`
+```bash
+go test ./...
+```
 
 ### to make changes to the easyapplybot.py
 rebuild the pyinstaller exe binary that places it in the build/ dir with:
