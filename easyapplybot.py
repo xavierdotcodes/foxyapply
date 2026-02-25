@@ -1,5 +1,4 @@
-import argparse
-import asyncio
+import csv
 import json
 import logging
 import os
@@ -7,14 +6,10 @@ import random
 import re
 import threading
 import time
-import csv
-from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
-from typing import List, Optional
+from typing import Callable, List, Optional
 from urllib.parse import urlparse
 
-import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
 from selenium import webdriver
@@ -25,7 +20,6 @@ from selenium.webdriver.support.ui import WebDriverWait, Select
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from bs4 import BeautifulSoup
-import pandas as pd
 try:
     import pyautogui
 except ImportError:
@@ -39,7 +33,7 @@ log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Pydantic model matching Go's LinkedInProfile / ProfilePayload
+# Pydantic model
 # ---------------------------------------------------------------------------
 
 class ProfileConfig(BaseModel):
@@ -61,52 +55,10 @@ class ProfileConfig(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# WebSocket connection manager
-# ---------------------------------------------------------------------------
-
-class ConnectionManager:
-    def __init__(self):
-        self.connections: List[WebSocket] = []
-
-    async def connect(self, ws: WebSocket):
-        await ws.accept()
-        self.connections.append(ws)
-
-    def disconnect(self, ws: WebSocket):
-        if ws in self.connections:
-            self.connections.remove(ws)
-
-    async def broadcast(self, event_type: str, data: Optional[dict] = None):
-        message = json.dumps({"type": event_type, "data": data or {}})
-        for ws in list(self.connections):
-            try:
-                await ws.send_text(message)
-            except Exception:
-                self.connections.remove(ws)
-
-
-ws_manager = ConnectionManager()
-
-# We need a reference to the running asyncio loop so the bot thread can
-# schedule coroutines (broadcast) from its synchronous context.
-_loop: Optional[asyncio.AbstractEventLoop] = None
-
-
-def emit_event(event_type: str, data: Optional[dict] = None):
-    """Thread-safe helper to broadcast a WebSocket event from any thread."""
-    if _loop is None:
-        return
-    asyncio.run_coroutine_threadsafe(
-        ws_manager.broadcast(event_type, data), _loop
-    )
-
-
-# ---------------------------------------------------------------------------
 # Logger setup
 # ---------------------------------------------------------------------------
 
 def setup_logger() -> None:
-    dt = datetime.strftime(datetime.now(), "%m_%d_%y %H_%M_%S_")
     log_dir = os.path.join('.', 'logs')
     if not os.path.isdir(log_dir):
         os.makedirs(log_dir, exist_ok=True)
@@ -115,22 +67,25 @@ def setup_logger() -> None:
         datefmt='%d-%b-%y %H:%M:%S',
     )
     log.setLevel(logging.DEBUG)
-    c_handler = logging.StreamHandler()
-    c_handler.setLevel(logging.DEBUG)
-    c_format = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s', '%H:%M:%S')
-    c_handler.setFormatter(c_format)
-    log.addHandler(c_handler)
+    if not log.handlers:
+        c_handler = logging.StreamHandler()
+        c_handler.setLevel(logging.DEBUG)
+        c_format = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s', '%H:%M:%S')
+        c_handler.setFormatter(c_format)
+        log.addHandler(c_handler)
 
 
 # ---------------------------------------------------------------------------
-# EasyApplyBot  (refactored: accepts ProfileConfig, uses stop event)
+# EasyApplyBot
 # ---------------------------------------------------------------------------
 
 class EasyApplyBot:
     MAX_SEARCH_TIME = 20 * 60 * 60
 
-    def __init__(self, config: ProfileConfig) -> None:
+    def __init__(self, config: ProfileConfig, on_event: Optional[Callable[[str, dict], None]] = None) -> None:
         setup_logger()
+
+        self._on_event = on_event
 
         if config.openai_api_key:
             os.environ["OPENAI_API_KEY"] = config.openai_api_key
@@ -159,13 +114,17 @@ class EasyApplyBot:
         self.blacklist = [c.lower() for c in config.blacklist]
         self.blacklist_titles = [t.lower() for t in config.blacklist_titles]
 
-        self.filename = "output.csv"
-        past_ids = self.get_appliedIDs(self.filename)
-        self.appliedJobIDs = past_ids if past_ids is not None else []
-
         # Setup Selenium driver
         self.browser = self._create_driver()
         self.wait = WebDriverWait(self.browser, 30)
+
+    def _emit(self, event_type: str, data: Optional[dict] = None) -> None:
+        """Call the on_event callback if set."""
+        if self._on_event is not None:
+            try:
+                self._on_event(event_type, data or {})
+            except Exception as e:
+                log.debug(f"on_event callback error: {e}")
 
     def _create_driver(self):
         ua = UserAgent()
@@ -200,26 +159,6 @@ class EasyApplyBot:
             pass
 
     # ------------------------------------------------------------------
-    # CSV helpers
-    # ------------------------------------------------------------------
-
-    def get_appliedIDs(self, filename):
-        try:
-            df = pd.read_csv(
-                filename, header=None,
-                names=['timestamp', 'jobID', 'job', 'company', 'attempted', 'result'],
-                lineterminator='\n', encoding='utf-8',
-            )
-            df['timestamp'] = pd.to_datetime(df['timestamp'], format="%Y-%m-%d %H:%M:%S")
-            df = df[df['timestamp'] > (datetime.now() - timedelta(days=2))]
-            jobIDs = list(df.jobID)
-            log.info(f"{len(jobIDs)} jobIDs found")
-            return jobIDs
-        except Exception as e:
-            log.info(f"{e}   jobIDs could not be loaded from CSV {filename}")
-            return None
-
-    # ------------------------------------------------------------------
     # LinkedIn login
     # ------------------------------------------------------------------
 
@@ -237,14 +176,14 @@ class EasyApplyBot:
             time.sleep(2)
             login_button.click()
             time.sleep(3)
-            emit_event("login_success")
+            self._emit("login_success")
             return True
         except TimeoutException:
             log.info("TimeoutException! Username/password field or login button not found")
-            emit_event("login_failed", {"error": "Timeout finding login fields"})
+            self._emit("login_failed", {"error": "Timeout finding login fields"})
             return False
         except Exception as e:
-            emit_event("login_failed", {"error": str(e)})
+            self._emit("login_failed", {"error": str(e)})
             return False
 
     # ------------------------------------------------------------------
@@ -353,7 +292,7 @@ class EasyApplyBot:
                         log.info(f"Skipping blacklisted title: {job_title}")
                         continue
 
-                    emit_event("job_applying", {"job_id": str(jobID), "title": job_title, "company": company})
+                    self._emit("job_applying", {"job_id": str(jobID), "title": job_title, "company": company})
 
                     button = self.get_easy_apply_button()
 
@@ -364,15 +303,15 @@ class EasyApplyBot:
                         count_application += 1
                         if result:
                             self.applied_count += 1
-                            emit_event("job_applied", {"job_id": str(jobID), "title": job_title, "company": company})
+                            self._emit("job_applied", {"job_id": str(jobID), "title": job_title, "company": company})
                         else:
                             self.failed_count += 1
-                            emit_event("job_failed", {"job_id": str(jobID), "title": job_title, "error": "submit failed"})
+                            self._emit("job_failed", {"job_id": str(jobID), "title": job_title, "error": "submit failed"})
                     else:
                         log.info("The button does not exist.")
                         result = False
 
-                    emit_event("progress", {
+                    self._emit("progress", {
                         "applied": self.applied_count,
                         "failed": self.failed_count,
                         "total_seen": self.total_seen,
@@ -392,7 +331,7 @@ class EasyApplyBot:
 
             except Exception as e:
                 log.error(f"Exception in main application loop: {e}")
-                emit_event("error", {"message": str(e)})
+                self._emit("error", {"message": str(e)})
 
     # ------------------------------------------------------------------
     # Page / job helpers
@@ -404,20 +343,6 @@ class EasyApplyBot:
             if target:
                 target = target.group(1)
             return target
-
-        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        attempted = False if button is False else True
-        try:
-            job = re_extract(browserTitle.split(' | ')[0], r"\(?\d?\)?\s?(\w.*)")
-            company = re_extract(browserTitle.split(' | ')[1], r"(\w.*)")
-        except Exception:
-            job = "Unknown"
-            company = "Unknown"
-
-        toWrite = [timestamp, jobID, job, company, attempted, result]
-        with open(self.filename, 'a', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow(toWrite)
 
     def get_job_page(self, jobID):
         job = 'https://www.linkedin.com/jobs/view/' + str(jobID)
@@ -634,7 +559,6 @@ class EasyApplyBot:
             input_id = your_name_label.get_attribute('for')
             input_element = self.browser.find_element(By.ID, input_id)
             input_element.clear()
-            # Use email username as a fallback name
             name = self.config.email.split('@')[0].replace('.', ' ').replace('_', ' ').title()
             input_element.send_keys(name)
         except Exception as e:
@@ -766,8 +690,6 @@ class EasyApplyBot:
             time.sleep(0.5)
             pyautogui.press('esc')
         except Exception as e:
-            # pyautogui requires a display server (X11/Wayland on Linux,
-            # Quartz on macOS). Skip mouse jiggle if unavailable.
             log.debug(f"avoid_lock skipped (no display?): {e}")
 
     def next_jobs_page(self, position, location, jobs_per_page):
@@ -842,7 +764,7 @@ class EasyApplyBot:
 
 
 # ---------------------------------------------------------------------------
-# Bot runner state (module-level so FastAPI endpoints can access it)
+# Bot runner
 # ---------------------------------------------------------------------------
 
 _bot: Optional[EasyApplyBot] = None
@@ -851,132 +773,45 @@ _bot_lock = threading.Lock()
 _applying = False
 
 
-def _run_bot(config: ProfileConfig):
+def _run_bot(config: ProfileConfig, on_event: Optional[Callable[[str, dict], None]] = None):
     """Target function for the bot background thread."""
     global _bot, _applying
     try:
-        _bot = EasyApplyBot(config)
+        _bot = EasyApplyBot(config, on_event=on_event)
 
         if not _bot.start_linkedin(config.email, config.password):
-            emit_event("bot_stopped", {"reason": "login_failed"})
+            if on_event:
+                on_event("bot_stopped", {"reason": "login_failed"})
             _bot.close()
             _bot = None
             _applying = False
             return
 
-        emit_event("bot_started")
+        if on_event:
+            on_event("bot_started", {})
         _applying = True
 
         positions = [p for p in config.positions if p]
         locations = [loc for loc in config.locations if loc]
 
         if not positions or not locations:
-            emit_event("bot_stopped", {"reason": "no positions or locations configured"})
+            if on_event:
+                on_event("bot_stopped", {"reason": "no positions or locations configured"})
             _bot.close()
             _bot = None
             _applying = False
             return
 
         _bot.start_apply(positions, locations)
-        emit_event("bot_stopped", {"reason": "completed"})
+        if on_event:
+            on_event("bot_stopped", {"reason": "completed"})
     except Exception as e:
         log.error(f"Bot thread exception: {e}")
-        emit_event("error", {"message": str(e)})
-        emit_event("bot_stopped", {"reason": f"error: {e}"})
+        if on_event:
+            on_event("error", {"message": str(e)})
+            on_event("bot_stopped", {"reason": f"error: {e}"})
     finally:
         if _bot:
             _bot.close()
             _bot = None
         _applying = False
-
-
-# ---------------------------------------------------------------------------
-# FastAPI application
-# ---------------------------------------------------------------------------
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    global _loop
-    _loop = asyncio.get_running_loop()
-    yield
-    # Shutdown: stop bot if running
-    with _bot_lock:
-        if _bot:
-            _bot.stop()
-
-
-app = FastAPI(lifespan=lifespan)
-
-
-@app.get("/health")
-async def health():
-    return {"status": "ok"}
-
-
-@app.get("/status")
-async def status():
-    return {
-        "running": _bot is not None,
-        "applying": _applying,
-        "applied_count": _bot.applied_count if _bot else 0,
-        "failed_count": _bot.failed_count if _bot else 0,
-    }
-
-
-@app.post("/start")
-async def start(config: ProfileConfig):
-    global _bot_thread
-    with _bot_lock:
-        if _bot is not None:
-            return {"error": "bot already running"}
-
-        _bot_thread = threading.Thread(target=_run_bot, args=(config,), daemon=True)
-        _bot_thread.start()
-
-    return {"status": "starting"}
-
-
-@app.post("/stop")
-async def stop():
-    global _bot, _bot_thread, _applying
-    with _bot_lock:
-        if _bot is None:
-            return {"status": "not running"}
-        _bot.stop()
-
-    # Wait for thread to finish
-    if _bot_thread and _bot_thread.is_alive():
-        _bot_thread.join(timeout=10)
-
-    # Force close if still around
-    with _bot_lock:
-        if _bot:
-            _bot.close()
-            _bot = None
-        _applying = False
-
-    return {"status": "stopped"}
-
-
-@app.websocket("/ws")
-async def websocket_endpoint(ws: WebSocket):
-    await ws_manager.connect(ws)
-    try:
-        while True:
-            # Keep connection alive; we mainly send events *to* Go
-            await ws.receive_text()
-    except WebSocketDisconnect:
-        ws_manager.disconnect(ws)
-
-
-# ---------------------------------------------------------------------------
-# Entrypoint
-# ---------------------------------------------------------------------------
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="EasyApplyBot FastAPI server")
-    parser.add_argument("--port", type=int, default=8765, help="Port to listen on")
-    parser.add_argument("--host", type=str, default="127.0.0.1", help="Host to bind to")
-    args = parser.parse_args()
-
-    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
