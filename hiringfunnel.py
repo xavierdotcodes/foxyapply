@@ -29,7 +29,6 @@ PROFILE_FIELDS = [
     ("password", "LinkedIn password", "password"),
     ("phone_number", "Phone number", "text"),
     ("positions", "Job positions (comma-separated)", "text"),
-    ("locations", "Locations to search (comma-separated)", "text"),
     ("remote_only", "Remote only?", "confirm"),
     ("profile_url", "LinkedIn profile URL", "text"),
     ("user_city", "City", "text"),
@@ -86,12 +85,24 @@ def prompt_profile(existing: Optional[dict] = None) -> Optional[dict]:
             if result is None:
                 return None
 
-            if field in ("positions", "locations", "blacklist", "blacklist_titles"):
+            if field in ("positions", "blacklist", "blacklist_titles"):
                 answers[field] = _parse_list(result)
             elif field in ("years_experience", "desired_salary"):
                 answers[field] = _parse_int(result)
             else:
                 answers[field] = result
+
+    # Derive search locations from city/state
+    city = answers.get("user_city", "").strip()
+    state = answers.get("user_state", "").strip()
+    if city and state:
+        answers["locations"] = [f"{city}, {state}"]
+    elif city:
+        answers["locations"] = [city]
+    elif state:
+        answers["locations"] = [state]
+    else:
+        answers["locations"] = []
 
     return answers
 

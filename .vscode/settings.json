@@ -11,5 +11,7 @@
         "**/.pytest_cache/": true,
         "**/bin/": true,
         "**/signing-key.asc/": true,
+        "**/__pycache__/": true,
+        "**/venv/": true
     }
 }
