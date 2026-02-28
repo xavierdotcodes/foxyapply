@@ -13,7 +13,7 @@ git clone https://github.com/pypesdev/hiring-funnel && cd hiring-funnel
 python3 -m venv .venv
 source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-python hiringfunnel.py
+python3 hiringfunnel.py
 ```
 
 ## How It Works

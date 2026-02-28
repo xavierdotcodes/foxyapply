@@ -556,13 +556,16 @@ class EasyApplyBot:
 
         try:
             your_name_label = self.browser.find_element(By.XPATH, "//label[contains(text(), 'Your Name')]")
-            input_id = your_name_label.get_attribute('for')
+            
+        except Exception as e:
+            your_name_label = None
+            
+        if your_name_label:
+            input_id = your_name_label.get_attribute('for') if your_name_label else None
             input_element = self.browser.find_element(By.ID, input_id)
             input_element.clear()
             name = self.config.email.split('@')[0].replace('.', ' ').replace('_', ' ').title()
             input_element.send_keys(name)
-        except Exception as e:
-            log.error(f"Error finding your name label: {e}")
 
         text_inputs = self.browser.find_elements(By.XPATH, '//input[contains(@class, "fb-dash-form-element")]')
         for input_element in text_inputs:
