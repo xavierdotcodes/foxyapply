@@ -640,6 +640,9 @@ class EasyApplyBot:
                     elif "no" in ot and "require" in question_lower:
                         select_obj.select_by_visible_text(option.text)
                         log.info(f"Selected option '{option.text}' for question: {question_text}")
+                    elif any(word in ot for word in ["confirm", "accept", "acknowledge"]):
+                        select_obj.select_by_visible_text(option.text)
+                        log.info(f"Selected option '{option.text}' for question: {question_text}")
                     elif ("yes" in ot and "do you require" not in question_lower) or "native" in ot or "U.S." in ot or "us" in ot or "linkedin" in ot or "united states" in ot or "citizen" in ot:
                         select_obj.select_by_visible_text(option.text)
                         log.info(f"Selected option '{option.text}' for question: {question_text}")
