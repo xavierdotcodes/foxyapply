@@ -383,13 +383,16 @@ class EasyApplyBot:
 
     def get_easy_apply_button(self):
         try:
-            button = self.browser.find_elements("xpath", '//*[contains(@aria-label, "Easy Apply to")]')
+            button = self.browser.find_elements("xpath", '//*[contains(@aria-label, "Easy Apply to") or contains(@aria-label, "LinkedIn Apply to")]')
             if len(button) == 0:
                 return False
+
             javascript = """
             let elements = Array.from(document.querySelectorAll('button[aria-label]'));
-            let targetElement = elements.find(el => el.getAttribute('aria-label').includes('Easy Apply to'));
-            if (targetElement) { targetElement.click(); }
+            let targetElement = elements.find(el => el.getAttribute('aria-label').includes('Easy Apply to') || el.getAttribute('aria-label').includes('LinkedIn Apply to'));
+            if (targetElement) {
+                targetElement.click();
+            }
             """
             self.browser.execute_script(javascript)
             time.sleep(1)
