@@ -1,6 +1,7 @@
 """HiringFunnel – TUI entry point."""
 
 import logging
+import os
 import threading
 import time
 from typing import Optional
@@ -16,8 +17,9 @@ from profiles import delete_profile, list_names, load_profiles, upsert_profile
 
 console = Console()
 
-# Suppress bot's own stream handler output while the TUI is running
-logging.getLogger("easyapplybot").setLevel(logging.WARNING)
+# Silence noisy third-party loggers at module level
+for _noisy in ("selenium", "urllib3", "WDM"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
 
 
 # ---------------------------------------------------------------------------
@@ -36,7 +38,8 @@ PROFILE_FIELDS = [
     ("zip_code", "ZIP code", "text"),
     ("years_experience", "Years of experience", "text"),
     ("desired_salary", "Desired salary", "text"),
-    ("openai_api_key", "OpenAI API key (optional)", "text"),
+    ("ai_provider", "AI provider", "select", ["openai", "anthropic", "gemini", "ollama"]),
+    ("ai_api_key", "API key for selected provider (blank for Ollama)", "text"),
     ("blacklist", "Blacklisted companies (comma-separated)", "text"),
     ("blacklist_titles", "Blacklisted job titles (comma-separated)", "text"),
 ]
@@ -58,10 +61,19 @@ def prompt_profile(existing: Optional[dict] = None) -> Optional[dict]:
     data = existing or {}
     answers = {}
 
-    for field, label, kind in PROFILE_FIELDS:
+    for field_def in PROFILE_FIELDS:
+        field, label, kind = field_def[0], field_def[1], field_def[2]
+        choices = field_def[3] if len(field_def) > 3 else None
         current = data.get(field, "")
 
-        if kind == "confirm":
+        if kind == "select":
+            default = current if current in choices else choices[0]
+            result = questionary.select(label, choices=choices, default=default).ask()
+            if result is None:
+                return None
+            answers[field] = result
+
+        elif kind == "confirm":
             default = bool(current) if isinstance(current, bool) else False
             result = questionary.confirm(label, default=default).ask()
             if result is None:
@@ -171,9 +183,38 @@ class BotState:
         return Panel(body, title="[bold blue]HiringFunnel[/bold blue]", expand=False)
 
 
+def _redirect_logs_to_file() -> None:
+    """Route all log output to a file so nothing bleeds into the TUI."""
+    os.makedirs("logs", exist_ok=True)
+    file_handler = logging.FileHandler("logs/hiringfunnel.log")
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(
+        logging.Formatter("%(asctime)s - %(levelname)s - %(name)s - %(message)s", "%H:%M:%S")
+    )
+
+    # Strip StreamHandlers from root so basicConfig() won't add another one
+    root = logging.getLogger()
+    for h in list(root.handlers):
+        if isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler):
+            root.removeHandler(h)
+    root.addHandler(file_handler)
+
+    # Pre-populate the easyapplybot logger so setup_logger()'s
+    # `if not log.handlers` guard skips adding a StreamHandler
+    bot_log = logging.getLogger("easyapplybot")
+    for h in list(bot_log.handlers):
+        if isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler):
+            bot_log.removeHandler(h)
+    bot_log.addHandler(file_handler)
+    bot_log.setLevel(logging.DEBUG)
+    bot_log.propagate = False
+
+
 def run_profile(name: str, config: ProfileConfig) -> None:
     state = BotState(name)
     stop_event = threading.Event()
+
+    _redirect_logs_to_file()
 
     def bot_thread_fn():
         _run_bot(config, on_event=state.on_event)

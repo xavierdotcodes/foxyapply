@@ -1,16 +1,13 @@
-import csv
-import json
 import logging
 import os
 import random
 import re
 import threading
 import time
-from datetime import datetime, timedelta
 from typing import Callable, List, Optional
 from urllib.parse import urlparse
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
@@ -24,6 +21,22 @@ try:
     import pyautogui
 except ImportError:
     pyautogui = None  # type: ignore[assignment]
+
+try:
+    import anthropic as _anthropic
+except ImportError:
+    _anthropic = None  # type: ignore[assignment]
+
+try:
+    import google.generativeai as _genai
+except ImportError:
+    _genai = None  # type: ignore[assignment]
+
+try:
+    import ollama as _ollama
+except ImportError:
+    _ollama = None  # type: ignore[assignment]
+
 from fake_useragent import UserAgent
 import requests
 from openai import OpenAI
@@ -49,9 +62,18 @@ class ProfileConfig(BaseModel):
     zip_code: str = ""
     years_experience: int = 0
     desired_salary: int = 0
-    openai_api_key: str = ""
+    ai_provider: str = "openai"   # "openai" | "anthropic" | "gemini" | "ollama"
+    ai_api_key: str = ""
     blacklist: List[str] = []
     blacklist_titles: List[str] = []
+
+    @model_validator(mode='before')
+    @classmethod
+    def _migrate_legacy(cls, data):
+        if isinstance(data, dict) and 'openai_api_key' in data and 'ai_api_key' not in data:
+            data['ai_api_key'] = data.pop('openai_api_key')
+            data.setdefault('ai_provider', 'openai')
+        return data
 
 
 # ---------------------------------------------------------------------------
@@ -87,13 +109,22 @@ class EasyApplyBot:
 
         self._on_event = on_event
 
-        if config.openai_api_key:
-            os.environ["OPENAI_API_KEY"] = config.openai_api_key
+        _PROVIDER_ENV = {
+            "openai": "OPENAI_API_KEY",
+            "anthropic": "ANTHROPIC_API_KEY",
+            "gemini": "GOOGLE_API_KEY",
+        }
+        if config.ai_api_key:
+            env_var = _PROVIDER_ENV.get(config.ai_provider.lower())
+            if env_var:
+                os.environ[env_var] = config.ai_api_key
         else:
             load_dotenv()
 
-        if not os.environ.get("OPENAI_API_KEY"):
-            log.warning("OPENAI_API_KEY not set – LLM fallback will be disabled")
+        if config.ai_provider.lower() != "ollama" and not os.environ.get(
+            _PROVIDER_ENV.get(config.ai_provider.lower(), "")
+        ):
+            log.warning("AI API key not set – LLM fallback will be disabled")
 
         log.info("Welcome to Easy Apply Bot")
 
@@ -650,7 +681,7 @@ class EasyApplyBot:
                         select_obj.select_by_visible_text(option.text)
                         log.info(f"Selected option '{option.text}' for question: {question_text}")
         except Exception as e:
-            log.error(f'error doing select inputs: {e}')
+            select_inputs = None
 
         text_area_inputs = self.browser.find_elements(By.XPATH, '//textarea[contains(@class, "fb-dash-form-element")]')
         for textarea in text_area_inputs:
@@ -690,9 +721,6 @@ class EasyApplyBot:
             return
         try:
             pyautogui.FAILSAFE = False
-            x, _ = pyautogui.position()
-            pyautogui.moveTo(x + 200, pyautogui.position().y, duration=1.0)
-            pyautogui.moveTo(x, pyautogui.position().y, duration=0.5)
             time.sleep(0.5)
             pyautogui.press('esc')
         except Exception as e:
@@ -703,7 +731,6 @@ class EasyApplyBot:
             "https://www.linkedin.com/jobs/search/?f_LF=f_AL&keywords=" +
             position + location + "&sortBy=DD&start=" + str(jobs_per_page))
         self.avoid_lock()
-        log.info("Lock avoided.")
         self.load_page()
         return (self.browser, jobs_per_page)
 
@@ -738,34 +765,86 @@ class EasyApplyBot:
             log.debug(f"Could not extract select question text: {e}")
         return ""
 
+    def _build_llm_prompt(self, label_text):
+        name = self.config.email.split('@')[0].replace('.', ' ').replace('_', ' ').title()
+        positions_str = ', '.join(self.config.positions) if self.config.positions else "Software Engineer"
+        location_str = self.location or "United States"
+        yoe = self.years_of_experience or "3"
+        salary = self.desired_salary or "100000"
+        return (
+            f"You are {name}, a professional applying for jobs as a {positions_str} "
+            f"based in {location_str} with {yoe} years of experience. "
+            f"Provide a short, succinct, professional answer for the following job application question: "
+            f"'{label_text}'. If it asks for numerics such as years of experience or hourly wage, "
+            f"answer with a numeric digit response: {yoe} for years of experience, and {salary} for salary."
+        )
+
+    def _llm_openai(self, label_text):
+        openai_api_key = os.environ.get("OPENAI_API_KEY")
+        if not openai_api_key:
+            return ""
+        client = OpenAI(api_key=openai_api_key)
+        prompt = self._build_llm_prompt(label_text)
+        response = client.responses.create(
+            model="gpt-4o",
+            instructions=prompt,
+            input=label_text,
+        )
+        return response.output_text.strip()
+
+    def _llm_anthropic(self, label_text):
+        if _anthropic is None:
+            log.warning("anthropic package not installed – skipping LLM fallback")
+            return ""
+        prompt = self._build_llm_prompt(label_text)
+        client = _anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=100,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return response.content[0].text.strip()
+
+    def _llm_gemini(self, label_text):
+        if _genai is None:
+            log.warning("google-generativeai package not installed – skipping LLM fallback")
+            return ""
+        prompt = self._build_llm_prompt(label_text)
+        _genai.configure(api_key=os.environ.get("GOOGLE_API_KEY", ""))
+        model = _genai.GenerativeModel("gemini-2.0-flash")
+        response = model.generate_content(prompt)
+        return response.text.strip()
+
+    def _llm_ollama(self, label_text):
+        if _ollama is None:
+            log.warning("ollama package not installed – skipping LLM fallback")
+            return ""
+        prompt = self._build_llm_prompt(label_text)
+        response = _ollama.chat(
+            model="llama3.2",
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return response["message"]["content"].strip()
+
     def get_llm_suggested_answer(self, label_text, input_type="text"):
+        provider = self.config.ai_provider.lower()
         try:
-            openai_api_key = os.environ.get("OPENAI_API_KEY")
-            if not openai_api_key:
+            if provider == "openai":
+                answer = self._llm_openai(label_text)
+            elif provider == "anthropic":
+                answer = self._llm_anthropic(label_text)
+            elif provider == "gemini":
+                answer = self._llm_gemini(label_text)
+            elif provider == "ollama":
+                answer = self._llm_ollama(label_text)
+            else:
+                log.warning(f"Unknown AI provider '{provider}' – skipping LLM fallback")
                 return ""
-            client = OpenAI(api_key=openai_api_key)
-            name = self.config.email.split('@')[0].replace('.', ' ').replace('_', ' ').title()
-            positions_str = ', '.join(self.config.positions) if self.config.positions else "Software Engineer"
-            location_str = self.location or "United States"
-            yoe = self.years_of_experience or "3"
-            salary = self.desired_salary or "100000"
-            prompt = (
-                f"You are {name}, a professional applying for jobs as a {positions_str} "
-                f"based in {location_str} with {yoe} years of experience. "
-                f"Provide a short, succinct, professional answer for the following job application question: "
-                f"'{label_text}'. If it asks for numerics such as years of experience or hourly wage, "
-                f"answer with a numeric digit response: {yoe} for years of experience, and {salary} for salary."
-            )
-            response = client.responses.create(
-                model="gpt-4o",
-                instructions=prompt,
-                input=label_text,
-            )
-            answer = response.output_text.strip()
-            log.info(f"LLM suggested answer for '{label_text}': {answer}")
+            if answer:
+                log.info(f"LLM suggested answer for '{label_text}': {answer}")
             return answer
         except Exception as e:
-            log.error(f"OpenAI LLM request failed: {e}")
+            log.error(f"LLM request failed ({provider}): {e}")
         return ""
 
 

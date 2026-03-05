@@ -32,7 +32,8 @@ class TestProfileConfig:
             zip_code="10001",
             years_experience=5,
             desired_salary=120000,
-            openai_api_key="sk-test",
+            ai_provider="openai",
+            ai_api_key="sk-test",
             blacklist=["Coinbase"],
             blacklist_titles=["intern"],
         )
@@ -44,6 +45,8 @@ class TestProfileConfig:
         assert config.remote_only is True
         assert config.years_experience == 5
         assert config.desired_salary == 120000
+        assert config.ai_provider == "openai"
+        assert config.ai_api_key == "sk-test"
         assert config.blacklist == ["Coinbase"]
         assert config.blacklist_titles == ["intern"]
 
@@ -59,7 +62,8 @@ class TestProfileConfig:
         assert config.zip_code == ""
         assert config.years_experience == 0
         assert config.desired_salary == 0
-        assert config.openai_api_key == ""
+        assert config.ai_provider == "openai"
+        assert config.ai_api_key == ""
         assert config.blacklist == []
         assert config.blacklist_titles == []
 
@@ -97,7 +101,20 @@ class TestProfileConfig:
         assert "zip_code" in data
         assert "years_experience" in data
         assert "desired_salary" in data
-        assert "openai_api_key" in data
+        assert "ai_provider" in data
+        assert "ai_api_key" in data
+
+    def test_legacy_openai_api_key_migration(self):
+        """Old profiles with openai_api_key should be silently migrated."""
+        data = {
+            "email": "a@b.com",
+            "password": "pw",
+            "openai_api_key": "sk-legacy",
+        }
+        config = ProfileConfig(**data)
+        assert config.ai_api_key == "sk-legacy"
+        assert config.ai_provider == "openai"
+        assert not hasattr(config, "openai_api_key")
 
 
 # ---------------------------------------------------------------------------
@@ -441,3 +458,64 @@ class TestCrossPlatformJSONEncoding:
         assert data["positions"] == []
         assert data["locations"] == []
         assert isinstance(data["positions"], list)
+
+
+# ---------------------------------------------------------------------------
+# LLM provider routing tests
+# ---------------------------------------------------------------------------
+
+class TestLLMProviderRouting:
+    """Test that get_llm_suggested_answer routes to the correct helper."""
+
+    def _make_bot_stub(self, provider="openai"):
+        stub = MagicMock()
+        stub.config = ProfileConfig(email="a@b.com", password="pw", ai_provider=provider)
+        stub.location = "New York, NY"
+        stub.years_of_experience = "5"
+        stub.desired_salary = "120000"
+        stub._build_llm_prompt = EasyApplyBot._build_llm_prompt.__get__(stub)
+        stub._llm_openai = MagicMock(return_value="openai_answer")
+        stub._llm_anthropic = MagicMock(return_value="anthropic_answer")
+        stub._llm_gemini = MagicMock(return_value="gemini_answer")
+        stub._llm_ollama = MagicMock(return_value="ollama_answer")
+        stub.get_llm_suggested_answer = EasyApplyBot.get_llm_suggested_answer.__get__(stub)
+        return stub
+
+    def test_routes_to_openai(self):
+        stub = self._make_bot_stub("openai")
+        result = stub.get_llm_suggested_answer("Years of experience?")
+        stub._llm_openai.assert_called_once()
+        stub._llm_anthropic.assert_not_called()
+        assert result == "openai_answer"
+
+    def test_routes_to_anthropic(self):
+        stub = self._make_bot_stub("anthropic")
+        result = stub.get_llm_suggested_answer("Years of experience?")
+        stub._llm_anthropic.assert_called_once()
+        stub._llm_openai.assert_not_called()
+        assert result == "anthropic_answer"
+
+    def test_routes_to_gemini(self):
+        stub = self._make_bot_stub("gemini")
+        result = stub.get_llm_suggested_answer("Years of experience?")
+        stub._llm_gemini.assert_called_once()
+        stub._llm_openai.assert_not_called()
+        assert result == "gemini_answer"
+
+    def test_routes_to_ollama(self):
+        stub = self._make_bot_stub("ollama")
+        result = stub.get_llm_suggested_answer("Years of experience?")
+        stub._llm_ollama.assert_called_once()
+        stub._llm_openai.assert_not_called()
+        assert result == "ollama_answer"
+
+    def test_unknown_provider_returns_empty(self):
+        stub = self._make_bot_stub("unknown")
+        result = stub.get_llm_suggested_answer("Years of experience?")
+        assert result == ""
+
+    def test_exception_returns_empty(self):
+        stub = self._make_bot_stub("openai")
+        stub._llm_openai.side_effect = RuntimeError("API down")
+        result = stub.get_llm_suggested_answer("Years of experience?")
+        assert result == ""
