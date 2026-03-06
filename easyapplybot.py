@@ -778,8 +778,8 @@ class EasyApplyBot:
             f"You are {name}, a professional applying for jobs as a {positions_str} "
             f"based in {location_str} with {yoe} years of experience. "
             f"Provide a short, succinct, professional answer for the following job application question: "
-            f"'{label_text}'. If it asks for numerics such as years of experience or hourly wage, "
-            f"answer with a numeric digit response: {yoe} for years of experience, and {salary} for salary."
+            f"'{label_text}'. If it so much as mentions numerics such as experience or hourly wage, "
+            f"answer with ONLY a single numeric digit response and no additional text: {yoe} for years of experience, and {salary} for salary."
         )
 
     def _llm_openai(self, label_text):

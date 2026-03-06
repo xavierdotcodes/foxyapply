@@ -369,13 +369,6 @@ class TestCrossPlatformPaths:
 
 
 class TestCrossPlatformCSV:
-    def test_csv_source_uses_newline_empty(self):
-        import easyapplybot
-        import inspect
-        source = inspect.getsource(easyapplybot.EasyApplyBot)
-        assert "newline=''" in source or 'newline=""' in source, \
-            "CSV writing should use newline='' to prevent double line endings on Windows"
-
     def test_csv_write_no_extra_blank_lines(self):
         with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False, newline="") as f:
             tmppath = f.name

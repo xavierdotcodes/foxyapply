@@ -12,6 +12,7 @@ from rich.live import Live
 from rich.panel import Panel
 from rich.text import Text
 
+from db import get_all_stats, init_db, record_application
 from easyapplybot import EasyApplyBot, ProfileConfig, _run_bot
 from profiles import delete_profile, list_names, load_profiles, upsert_profile
 
@@ -152,12 +153,21 @@ class BotState:
             self.log_lines.append(f"  Applying: {title} @ {company}")
         elif event_type == "job_applied":
             title = data.get("title", "")
+            company = data.get("company", "")
             self.applied += 1
             self.log_lines.append(f"  [green]Applied[/green]: {title}")
+            try:
+                record_application(self.profile_name, data.get("job_id", ""), title, company, "applied")
+            except Exception:
+                pass
         elif event_type == "job_failed":
             title = data.get("title", "")
             self.failed += 1
             self.log_lines.append(f"  [red]Failed[/red]: {title}")
+            try:
+                record_application(self.profile_name, data.get("job_id", ""), title, data.get("company", ""), "failed")
+            except Exception:
+                pass
         elif event_type == "progress":
             self.applied = data.get("applied", self.applied)
             self.failed = data.get("failed", self.failed)
@@ -246,10 +256,11 @@ def run_profile(name: str, config: ProfileConfig) -> None:
 # Main menu
 # ---------------------------------------------------------------------------
 
-def build_menu_choices(names: list) -> list:
+def build_menu_choices(names: list, stats: dict = {}) -> list:
     choices = []
     for name in names:
-        choices.append(questionary.Choice(f'Run: "{name}"', value=("run", name)))
+        n_applied = stats.get(name, {}).get("applied", 0)
+        choices.append(questionary.Choice(f'Run: "{name}"  (applied: {n_applied})', value=("run", name)))
     if names:
         choices.append(questionary.Separator())
     choices.append(questionary.Choice("Create new profile", value=("create", None)))
@@ -262,9 +273,12 @@ def build_menu_choices(names: list) -> list:
 def main() -> None:
     console.print("[bold blue]HiringFunnel[/bold blue] – LinkedIn Easy Apply Bot\n")
 
+    init_db()
+
     while True:
         names = list_names()
-        choices = build_menu_choices(names)
+        stats = get_all_stats()
+        choices = build_menu_choices(names, stats)
 
         answer = questionary.select(
             "What would you like to do?",
