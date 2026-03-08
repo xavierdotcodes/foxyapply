@@ -1,6 +1,7 @@
 """HiringFunnel – TUI entry point."""
 
 import logging
+import logging.handlers
 import os
 import threading
 import time
@@ -196,7 +197,9 @@ class BotState:
 def _redirect_logs_to_file() -> None:
     """Route all log output to a file so nothing bleeds into the TUI."""
     os.makedirs("logs", exist_ok=True)
-    file_handler = logging.FileHandler("logs/hiringfunnel.log")
+    file_handler = logging.handlers.RotatingFileHandler(
+        "logs/hiringfunnel.log", maxBytes=5 * 1024 * 1024, backupCount=3
+    )
     file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(
         logging.Formatter("%(asctime)s - %(levelname)s - %(name)s - %(message)s", "%H:%M:%S")
