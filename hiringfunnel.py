@@ -14,7 +14,7 @@ from rich.panel import Panel
 from rich.text import Text
 
 from db import get_all_stats, init_db, record_application
-from easyapplybot import EasyApplyBot, ProfileConfig, _run_bot
+from easyapplybot import DailyLimitReachedException, EasyApplyBot, ProfileConfig, _run_bot
 from profiles import delete_profile, list_names, load_profiles, upsert_profile
 
 console = Console()
@@ -134,6 +134,7 @@ class BotState:
         self.status = "Starting..."
         self.log_lines: list = []
         self.stopped = False
+        self.daily_limit_hit = False
 
     def on_event(self, event_type: str, data: dict) -> None:
         if event_type == "bot_started":
@@ -173,6 +174,11 @@ class BotState:
             self.applied = data.get("applied", self.applied)
             self.failed = data.get("failed", self.failed)
             self.seen = data.get("total_seen", self.seen)
+        elif event_type == "daily_limit_reached":
+            self.daily_limit_hit = True
+            email = data.get("profile_email", "this profile")
+            self.status = f"Daily limit reached for {email}"
+            self.log_lines.append(f"  [yellow]Daily limit reached[/yellow] for {email}")
         elif event_type == "error":
             msg = data.get("message", "")
             self.log_lines.append(f"  [red]Error[/red]: {msg}")
@@ -223,35 +229,63 @@ def _redirect_logs_to_file() -> None:
     bot_log.propagate = False
 
 
-def run_profile(name: str, config: ProfileConfig) -> None:
-    state = BotState(name)
-    stop_event = threading.Event()
+def run_profile_sequence(start_name: str, all_names: list, profiles: dict) -> None:
+    """Run profiles in sequence, rotating to the next when daily limit is hit."""
+    remaining = [n for n in all_names if n != start_name]
+    names_to_try = [start_name] + remaining
 
     _redirect_logs_to_file()
+    stop_all = threading.Event()
 
-    def bot_thread_fn():
-        _run_bot(config, on_event=state.on_event)
-        stop_event.set()
+    for name in names_to_try:
+        if stop_all.is_set():
+            break
 
-    thread = threading.Thread(target=bot_thread_fn, daemon=True)
-    thread.start()
+        data = profiles.get(name, {})
+        try:
+            config = ProfileConfig(**data)
+        except Exception as e:
+            console.print(f"[red]Invalid profile '{name}': {e}[/red]")
+            continue
 
-    console.print("\nPress [bold]Ctrl+C[/bold] to stop.\n")
+        state = BotState(name)
+        bot_done = threading.Event()
 
-    try:
-        with Live(state.render(), refresh_per_second=2, console=console) as live:
-            while not state.stopped and not stop_event.is_set():
+        def bot_thread_fn(cfg=config, st=state, done=bot_done):
+            _run_bot(cfg, on_event=st.on_event)
+            done.set()
+
+        thread = threading.Thread(target=bot_thread_fn, daemon=True)
+        thread.start()
+
+        console.print(f"\nRunning profile [bold]{name}[/bold]. Press [bold]Ctrl+C[/bold] to stop.\n")
+
+        try:
+            with Live(state.render(), refresh_per_second=2, console=console) as live:
+                while not state.stopped and not bot_done.is_set():
+                    live.update(state.render())
+                    time.sleep(0.5)
                 live.update(state.render())
-                time.sleep(0.5)
-            live.update(state.render())
-    except KeyboardInterrupt:
-        console.print("\n[yellow]Stopping bot...[/yellow]")
-        # Signal the bot to stop via the global module-level bot reference
-        from easyapplybot import _bot
-        if _bot is not None:
-            _bot.stop()
+        except KeyboardInterrupt:
+            console.print("\n[yellow]Stopping bot...[/yellow]")
+            from easyapplybot import _bot
+            if _bot is not None:
+                _bot.stop()
+            thread.join(timeout=15)
+            stop_all.set()
+            break
 
-    thread.join(timeout=15)
+        thread.join(timeout=15)
+
+        if state.daily_limit_hit:
+            idx = names_to_try.index(name) + 1
+            if idx < len(names_to_try):
+                console.print(f"[yellow]Switching to profile '{names_to_try[idx]}'...[/yellow]")
+            else:
+                console.print("[yellow]Daily limit reached. No more profiles to try.[/yellow]")
+        else:
+            break  # stopped cleanly — don't rotate
+
     console.print("[green]Bot stopped.[/green]")
 
 
@@ -296,13 +330,7 @@ def main() -> None:
 
         if action == "run":
             profiles = load_profiles()
-            data = profiles.get(target, {})
-            try:
-                config = ProfileConfig(**data)
-            except Exception as e:
-                console.print(f"[red]Invalid profile data: {e}[/red]")
-                continue
-            run_profile(target, config)
+            run_profile_sequence(target, names, profiles)
 
         elif action == "create":
             name = questionary.text("Profile name:").ask()

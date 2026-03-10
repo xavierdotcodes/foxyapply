@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from pydantic import ValidationError
 
-from easyapplybot import EasyApplyBot, ProfileConfig, _run_bot
+from easyapplybot import DailyLimitReachedException, EasyApplyBot, ProfileConfig, _run_bot
 
 
 # ---------------------------------------------------------------------------
@@ -512,3 +512,107 @@ class TestLLMProviderRouting:
         stub._llm_openai.side_effect = RuntimeError("API down")
         result = stub.get_llm_suggested_answer("Years of experience?")
         assert result == ""
+
+
+# ---------------------------------------------------------------------------
+# DailyLimitReachedException detection tests
+# ---------------------------------------------------------------------------
+
+class TestDailyLimitDetection:
+    """Test daily limit detection and propagation."""
+
+    def _make_bot_stub(self):
+        stub = MagicMock()
+        stub._check_daily_limit = EasyApplyBot._check_daily_limit.__get__(stub)
+        return stub
+
+    def _make_el(self, text):
+        el = MagicMock()
+        el.text = text
+        return el
+
+    def test_check_daily_limit_true(self):
+        stub = self._make_bot_stub()
+        stub.browser.find_elements.return_value = [
+            self._make_el("We limit daily submissions to protect our members.")
+        ]
+        assert stub._check_daily_limit() is True
+
+    def test_check_daily_limit_false_wrong_text(self):
+        stub = self._make_bot_stub()
+        stub.browser.find_elements.return_value = [
+            self._make_el("Please enter a valid phone number.")
+        ]
+        assert stub._check_daily_limit() is False
+
+    def test_check_daily_limit_false_no_elements(self):
+        stub = self._make_bot_stub()
+        stub.browser.find_elements.return_value = []
+        assert stub._check_daily_limit() is False
+
+    def test_check_daily_limit_case_insensitive(self):
+        stub = self._make_bot_stub()
+        stub.browser.find_elements.return_value = [
+            self._make_el("WE LIMIT DAILY SUBMISSIONS.")
+        ]
+        assert stub._check_daily_limit() is True
+
+    def test_check_daily_limit_matches_among_multiple_elements(self):
+        stub = self._make_bot_stub()
+        stub.browser.find_elements.return_value = [
+            self._make_el("Please enter your phone number."),
+            self._make_el("We limit daily submissions to protect our members."),
+        ]
+        assert stub._check_daily_limit() is True
+
+    def test_check_daily_limit_exception_returns_false(self):
+        stub = self._make_bot_stub()
+        stub.browser.find_elements.side_effect = Exception("stale element")
+        assert stub._check_daily_limit() is False
+
+    def test_get_easy_apply_button_raises_preclick(self):
+        """DailyLimitReachedException raised before button search when limit detected."""
+        stub = MagicMock()
+        stub._check_daily_limit.return_value = True
+        stub.get_easy_apply_button = EasyApplyBot.get_easy_apply_button.__get__(stub)
+        with pytest.raises(DailyLimitReachedException):
+            stub.get_easy_apply_button()
+        stub.browser.find_elements.assert_not_called()
+
+    def test_get_easy_apply_button_raises_postclick(self):
+        """DailyLimitReachedException raised after click when limit modal appears."""
+        stub = MagicMock()
+        # First call (pre-click) returns False, second call (post-click) returns True
+        stub._check_daily_limit.side_effect = [False, True]
+        stub.browser.find_elements.return_value = [MagicMock()]
+        stub.get_easy_apply_button = EasyApplyBot.get_easy_apply_button.__get__(stub)
+        with pytest.raises(DailyLimitReachedException):
+            stub.get_easy_apply_button()
+
+    def test_run_bot_emits_daily_limit_reached(self):
+        """_run_bot emits daily_limit_reached and bot_stopped when limit is hit."""
+        events = []
+        def handler(event_type, data):
+            events.append((event_type, data))
+
+        config = ProfileConfig(
+            email="test@example.com",
+            password="secret",
+            positions=["SWE"],
+            locations=["Remote"],
+        )
+
+        mock_bot = MagicMock()
+        mock_bot.start_linkedin.return_value = True
+        mock_bot.start_apply.side_effect = DailyLimitReachedException("limit reached")
+
+        with patch("easyapplybot.EasyApplyBot", return_value=mock_bot):
+            _run_bot(config, on_event=handler)
+
+        event_types = [e[0] for e in events]
+        assert "daily_limit_reached" in event_types
+        assert "bot_stopped" in event_types
+        limit_event = next(e for e in events if e[0] == "daily_limit_reached")
+        assert limit_event[1]["profile_email"] == "test@example.com"
+        stopped_event = next(e for e in events if e[0] == "bot_stopped")
+        assert stopped_event[1]["reason"] == "daily_limit_reached"

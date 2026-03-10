@@ -2,17 +2,13 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Debug Wails Backend",
-            "type": "go",
+            "name": "Debug Bot (first profile)",
+            "type": "debugpy",
             "request": "launch",
-            "mode": "debug",
-            "program": "${workspaceFolder}",
-            "env": {
-                "WAILS_ENV": "development"
-            },
-            "args": [
-                "dev"
-            ]
+            "program": "${workspaceFolder}/debug_run.py",
+            "python": "${workspaceFolder}/.venv/bin/python",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}"
         }
     ]
 }

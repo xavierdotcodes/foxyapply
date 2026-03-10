@@ -46,6 +46,15 @@ log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Custom exceptions
+# ---------------------------------------------------------------------------
+
+class DailyLimitReachedException(Exception):
+    """Raised when LinkedIn's daily Easy Apply submission limit is detected on page."""
+    pass
+
+
+# ---------------------------------------------------------------------------
 # Pydantic model
 # ---------------------------------------------------------------------------
 
@@ -156,6 +165,14 @@ class EasyApplyBot:
                 self._on_event(event_type, data or {})
             except Exception as e:
                 log.debug(f"on_event callback error: {e}")
+
+    def _check_daily_limit(self) -> bool:
+        """Return True if LinkedIn's daily submission limit notice is present."""
+        try:
+            elements = self.browser.find_elements(By.CLASS_NAME, "artdeco-inline-feedback__message")
+            return any("limit daily submissions" in el.text.lower() for el in elements)
+        except Exception:
+            return False
 
     def _create_driver(self):
         ua = UserAgent()
@@ -360,6 +377,8 @@ class EasyApplyBot:
                         self.avoid_lock()
                         self.browser, jobs_per_page = self.next_jobs_page(position, location, jobs_per_page)
 
+            except DailyLimitReachedException:
+                raise
             except Exception as e:
                 log.error(f"Exception in main application loop: {e}")
                 self._emit("error", {"message": str(e)})
@@ -382,6 +401,9 @@ class EasyApplyBot:
         return self.job_page
 
     def get_easy_apply_button(self):
+        if self._check_daily_limit():
+            log.info("Daily application limit detected before button check")
+            raise DailyLimitReachedException("Daily application limit reached")
         try:
             button = self.browser.find_elements("xpath", '//*[contains(@aria-label, "Easy Apply to") or contains(@aria-label, "LinkedIn Apply to")]')
             if len(button) == 0:
@@ -396,7 +418,14 @@ class EasyApplyBot:
             """
             self.browser.execute_script(javascript)
             time.sleep(1)
+
+            if self._check_daily_limit():
+                log.info("Daily application limit detected after button click")
+                raise DailyLimitReachedException("Daily application limit reached")
+
             return True
+        except DailyLimitReachedException:
+            raise
         except Exception as e:
             log.error(f"exception in get_easy_apply_button: {e}")
             return False
@@ -663,7 +692,6 @@ class EasyApplyBot:
             for inp in select_inputs:
                 question_text = self.get_select_question_text(inp)
                 question_lower = question_text.lower()
-                log.info(f"Select input question: {question_text}")
                 select_obj = Select(inp)
                 options = select_obj.options
                 for option in options:
@@ -893,6 +921,11 @@ def _run_bot(config: ProfileConfig, on_event: Optional[Callable[[str, dict], Non
         _bot.start_apply(positions, locations)
         if on_event:
             on_event("bot_stopped", {"reason": "completed"})
+    except DailyLimitReachedException:
+        log.info(f"Daily application limit reached for {config.email}")
+        if on_event:
+            on_event("daily_limit_reached", {"profile_email": config.email})
+            on_event("bot_stopped", {"reason": "daily_limit_reached"})
     except Exception as e:
         log.error(f"Bot thread exception: {e}")
         if on_event:

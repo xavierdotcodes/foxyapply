@@ -119,9 +119,12 @@ The `on_event` callback is called synchronously from the bot thread with:
 - `("job_applied", {"job_id": "...", "title": "...", "company": "..."})`
 - `("job_failed", {"job_id": "...", "title": "...", "error": "..."})`
 - `("progress", {"applied": N, "failed": N, "total_seen": N})`
+- `("daily_limit_reached", {"profile_email": "..."})` — LinkedIn's daily Easy Apply limit detected; bot stops and TUI rotates to next profile
 - `("error", {"message": "..."})`
 
 `_run_bot(config, on_event=None)` is the thread target. Creates the bot, logs in, starts applying.
+
+When `daily_limit_reached` fires, `run_profile_sequence` in `hiringfunnel.py` automatically continues with the next profile (sorted order, starting after the current one). If no profiles remain, the session ends.
 
 ---
 
