@@ -286,7 +286,7 @@ class EasyApplyBot:
             try:
                 log.info(f"{(self.MAX_SEARCH_TIME - (time.time() - start_time)) // 60} minutes left in this search")
 
-                self.load_page(sleep=2)
+                self.load_page()
                 links = self.browser.find_elements("xpath", '//div[@data-job-id]')
                 if len(links) == 0:
                     log.debug("No links found")
@@ -397,7 +397,7 @@ class EasyApplyBot:
     def get_job_page(self, jobID):
         job = 'https://www.linkedin.com/jobs/view/' + str(jobID)
         self.browser.get(job)
-        self.job_page = self.load_page(sleep=0.5)
+        self.job_page = self.load_page()
         return self.job_page
 
     def get_easy_apply_button(self):
@@ -593,7 +593,7 @@ class EasyApplyBot:
             llm_answer = self.get_llm_suggested_answer(label_text, input_type)
             if llm_answer:
                 return llm_answer
-            return '3'
+            return self.years_of_experience
 
         return ''
 
@@ -735,15 +735,12 @@ class EasyApplyBot:
                 except Exception:
                     pass
 
-    def load_page(self, sleep=1):
+    def load_page(self, sleep=.5):
         scroll_page = 0
-        while scroll_page < 4000:
+        while scroll_page < 2000:
             self.browser.execute_script("window.scrollTo(0," + str(scroll_page) + " );")
-            scroll_page += 200
+            scroll_page += 500
             time.sleep(sleep)
-        if sleep != 1:
-            self.browser.execute_script("window.scrollTo(0,0);")
-            time.sleep(sleep * 3)
         page = BeautifulSoup(self.browser.page_source, "lxml")
         return page
 

@@ -1,13 +1,12 @@
-"""Debug runner: runs the first saved profile without the TUI."""
+"""Debug runner: runs all saved profiles in sequence (starting from index 0) without the TUI."""
 from profiles import list_names, load_profiles
-from easyapplybot import ProfileConfig, _run_bot
+from hiringfunnel import run_profile_sequence
 
 names = list_names()
 if not names:
     print("No profiles found in ~/.hiringfunnel/profiles.json")
     raise SystemExit(1)
 
-name = names[0]
-config = ProfileConfig(**load_profiles()[name])
-print(f"Running profile: {name!r}")
-_run_bot(config)
+profiles = load_profiles()
+print(f"Starting with profile: {names[0]!r}  ({len(names)} profile(s) available)")
+run_profile_sequence(names[0], names, profiles)
