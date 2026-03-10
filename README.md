@@ -46,7 +46,7 @@ python hiringfunnel.py
 
 ```bash
 pip install pytest
-python -m pytest tests/ -v
+.venv/bin/python -m pytest tests/ -v  
 ```
 
 ## License

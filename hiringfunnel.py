@@ -58,55 +58,78 @@ def _parse_int(value: str, default: int = 0) -> int:
         return default
 
 
+def _prompt_single_field(field_def: tuple, current) -> tuple:
+    """Prompt for a single field. Returns (cancelled: bool, value)."""
+    field, label, kind = field_def[0], field_def[1], field_def[2]
+    choices = field_def[3] if len(field_def) > 3 else None
+
+    if kind == "select":
+        default = current if current in choices else choices[0]
+        result = questionary.select(label, choices=choices, default=default).ask()
+        if result is None:
+            return True, None
+        return False, result
+
+    elif kind == "confirm":
+        default = bool(current) if isinstance(current, bool) else False
+        result = questionary.confirm(label, default=default).ask()
+        if result is None:
+            return True, None
+        return False, result
+
+    elif kind == "password":
+        result = questionary.password(label).ask()
+        if result is None:
+            return True, None
+        return False, result if result else current
+
+    else:
+        display = current
+        if isinstance(display, list):
+            display = ", ".join(display)
+        elif isinstance(display, int):
+            display = str(display) if display else ""
+        result = questionary.text(label, default=str(display)).ask()
+        if result is None:
+            return True, None
+        if field in ("positions", "blacklist", "blacklist_titles"):
+            return False, _parse_list(result)
+        elif field in ("years_experience", "desired_salary"):
+            return False, _parse_int(result)
+        else:
+            return False, result
+
+
+def _field_choice_label(field_def: tuple, data: dict) -> str:
+    """Format a field picker label showing the current value."""
+    field, label, kind = field_def[0], field_def[1], field_def[2]
+    val = data.get(field, "")
+    if kind == "password":
+        display = "••••••••" if val else "(not set)"
+    elif kind == "confirm":
+        display = "Yes" if val else "No"
+    elif isinstance(val, list):
+        display = ", ".join(val) if val else "(empty)"
+    elif val == "" or val is None:
+        display = "(not set)"
+    else:
+        display = str(val)
+        if len(display) > 40:
+            display = display[:37] + "..."
+    return f"{label}: {display}"
+
+
 def prompt_profile(existing: Optional[dict] = None) -> Optional[dict]:
     """Prompt for all profile fields. Returns data dict or None if cancelled."""
     data = existing or {}
     answers = {}
 
     for field_def in PROFILE_FIELDS:
-        field, label, kind = field_def[0], field_def[1], field_def[2]
-        choices = field_def[3] if len(field_def) > 3 else None
-        current = data.get(field, "")
+        cancelled, value = _prompt_single_field(field_def, data.get(field_def[0], ""))
+        if cancelled:
+            return None
+        answers[field_def[0]] = value
 
-        if kind == "select":
-            default = current if current in choices else choices[0]
-            result = questionary.select(label, choices=choices, default=default).ask()
-            if result is None:
-                return None
-            answers[field] = result
-
-        elif kind == "confirm":
-            default = bool(current) if isinstance(current, bool) else False
-            result = questionary.confirm(label, default=default).ask()
-            if result is None:
-                return None
-            answers[field] = result
-
-        elif kind == "password":
-            result = questionary.password(label).ask()
-            if result is None:
-                return None
-            answers[field] = result if result else current
-
-        else:
-            # Convert list fields back to comma-separated string for display
-            if isinstance(current, list):
-                current = ", ".join(current)
-            elif isinstance(current, int):
-                current = str(current) if current else ""
-
-            result = questionary.text(label, default=str(current)).ask()
-            if result is None:
-                return None
-
-            if field in ("positions", "blacklist", "blacklist_titles"):
-                answers[field] = _parse_list(result)
-            elif field in ("years_experience", "desired_salary"):
-                answers[field] = _parse_int(result)
-            else:
-                answers[field] = result
-
-    # Derive search locations from city/state
     city = answers.get("user_city", "").strip()
     state = answers.get("user_state", "").strip()
     if city and state:
@@ -119,6 +142,42 @@ def prompt_profile(existing: Optional[dict] = None) -> Optional[dict]:
         answers["locations"] = []
 
     return answers
+
+
+def prompt_profile_edit(existing: dict) -> Optional[dict]:
+    """Edit individual profile fields via a picker loop. Returns updated dict or None if cancelled."""
+    data = dict(existing)
+
+    while True:
+        field_choices = [
+            questionary.Choice(_field_choice_label(fd, data), value=i)
+            for i, fd in enumerate(PROFILE_FIELDS)
+        ]
+        field_choices.append(questionary.Separator())
+        field_choices.append(questionary.Choice("Save & exit", value="save"))
+        field_choices.append(questionary.Choice("Cancel", value="cancel"))
+
+        action = questionary.select("Select field to edit:", choices=field_choices).ask()
+
+        if action is None or action == "cancel":
+            return None
+        if action == "save":
+            city = data.get("user_city", "").strip()
+            state = data.get("user_state", "").strip()
+            if city and state:
+                data["locations"] = [f"{city}, {state}"]
+            elif city:
+                data["locations"] = [city]
+            elif state:
+                data["locations"] = [state]
+            else:
+                data["locations"] = []
+            return data
+
+        field_def = PROFILE_FIELDS[action]
+        cancelled, value = _prompt_single_field(field_def, data.get(field_def[0], ""))
+        if not cancelled:
+            data[field_def[0]] = value
 
 
 # ---------------------------------------------------------------------------
@@ -357,7 +416,7 @@ def main() -> None:
             if not name:
                 continue
             profiles = load_profiles()
-            data = prompt_profile(existing=profiles.get(name, {}))
+            data = prompt_profile_edit(profiles.get(name, {}))
             if data is None:
                 continue
             upsert_profile(name, data)
