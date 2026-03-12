@@ -13,6 +13,7 @@ from hiringfunnel import (
     prompt_profile_edit,
     _field_choice_label,
     _prompt_single_field,
+    _open_linkedin_action,
 )
 
 
@@ -637,3 +638,88 @@ class TestPromptProfileEdit:
         choices = ms.call_args.kwargs["choices"]
         field_indices = [c.value for c in choices if hasattr(c, "value") and isinstance(c.value, int)]
         assert len(field_indices) == len(PROFILE_FIELDS)
+
+
+# ---------------------------------------------------------------------------
+# Open LinkedIn in browser — choice and handler
+# ---------------------------------------------------------------------------
+
+class TestOpenLinkedInChoice:
+    def _existing(self):
+        return {
+            "email": "test@example.com",
+            "password": "secret",
+        }
+
+    def test_open_linkedin_choice_present(self):
+        with patch("hiringfunnel.questionary.select") as ms:
+            ms.return_value.ask.return_value = "cancel"
+            prompt_profile_edit(self._existing())
+        choices = ms.call_args.kwargs["choices"]
+        values = [c.value for c in choices if hasattr(c, "value")]
+        assert "open_linkedin" in values
+
+    def test_missing_email_shows_warning(self):
+        with patch("hiringfunnel.console") as mc:
+            _open_linkedin_action({"email": "", "password": "secret"})
+        mc.print.assert_called_once()
+        printed = mc.print.call_args.args[0]
+        assert "email" in printed.lower() or "password" in printed.lower()
+
+    def test_missing_password_shows_warning(self):
+        with patch("hiringfunnel.console") as mc:
+            _open_linkedin_action({"email": "user@example.com", "password": ""})
+        mc.print.assert_called_once()
+        printed = mc.print.call_args.args[0]
+        assert "email" in printed.lower() or "password" in printed.lower()
+
+    def test_success_shows_confirmation(self):
+        def fake_thread(target=None, daemon=None):
+            t = MagicMock()
+            t.start = lambda: target()
+            return t
+
+        with patch("hiringfunnel.open_linkedin_profile", return_value=True), \
+             patch("hiringfunnel.threading.Thread", side_effect=fake_thread), \
+             patch("hiringfunnel.console") as mc:
+            _open_linkedin_action(self._existing())
+        printed_args = [call.args[0] for call in mc.print.call_args_list]
+        assert any("Browser opened" in a or "green" in a for a in printed_args)
+
+    def test_failure_shows_error(self):
+        import threading
+
+        def fake_thread(target=None, daemon=None):
+            t = MagicMock()
+            def start():
+                target()
+            t.start = start
+            return t
+
+        with patch("hiringfunnel.open_linkedin_profile", return_value=False), \
+             patch("hiringfunnel.threading.Thread", side_effect=fake_thread), \
+             patch("hiringfunnel.console") as mc:
+            _open_linkedin_action(self._existing())
+        printed_args = [call.args[0] for call in mc.print.call_args_list]
+        assert any("red" in a or "Failed" in a for a in printed_args)
+
+    def test_returns_to_loop_after_open(self):
+        """After open_linkedin, picker is shown again (loop continues)."""
+        import threading
+
+        def fake_thread(target=None, daemon=None):
+            t = MagicMock()
+            def start():
+                target()
+            t.start = start
+            return t
+
+        with patch("hiringfunnel.open_linkedin_profile", return_value=True), \
+             patch("hiringfunnel.threading.Thread", side_effect=fake_thread), \
+             patch("hiringfunnel.console"), \
+             patch("hiringfunnel.questionary.select") as ms:
+            # First call: open_linkedin, second call: cancel
+            ms.return_value.ask.side_effect = ["open_linkedin", "cancel"]
+            result = prompt_profile_edit(self._existing())
+        assert result is None  # cancelled on second loop
+        assert ms.call_count == 2

@@ -10,7 +10,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 from pydantic import ValidationError
 
-from easyapplybot import DailyLimitReachedException, EasyApplyBot, ProfileConfig, _run_bot
+from easyapplybot import DailyLimitReachedException, EasyApplyBot, ProfileConfig, _run_bot, open_linkedin_profile
+import easyapplybot
 
 
 # ---------------------------------------------------------------------------
@@ -616,3 +617,72 @@ class TestDailyLimitDetection:
         assert limit_event[1]["profile_email"] == "test@example.com"
         stopped_event = next(e for e in events if e[0] == "bot_stopped")
         assert stopped_event[1]["reason"] == "daily_limit_reached"
+
+
+# ---------------------------------------------------------------------------
+# open_linkedin_profile tests
+# ---------------------------------------------------------------------------
+
+def _make_profile(**kwargs):
+    defaults = dict(email="user@example.com", password="secret")
+    defaults.update(kwargs)
+    return ProfileConfig(**defaults)
+
+
+class TestOpenLinkedInProfile:
+    def setup_method(self):
+        # Reset module-level state before each test
+        easyapplybot._profile_browser = None
+
+    def test_returns_true_on_success(self):
+        driver = MagicMock()
+        with patch("easyapplybot._make_chrome_driver", return_value=driver):
+            result = open_linkedin_profile(_make_profile())
+        assert result is True
+
+    def test_navigates_to_profile_url(self):
+        driver = MagicMock()
+        profile_url = "https://linkedin.com/in/testuser"
+        with patch("easyapplybot._make_chrome_driver", return_value=driver):
+            open_linkedin_profile(_make_profile(profile_url=profile_url))
+        calls = [c.args[0] for c in driver.get.call_args_list]
+        assert profile_url in calls
+
+    def test_no_navigation_when_no_profile_url(self):
+        driver = MagicMock()
+        with patch("easyapplybot._make_chrome_driver", return_value=driver):
+            open_linkedin_profile(_make_profile())
+        # Only the login page get() should have been called
+        assert driver.get.call_count == 1
+
+    def test_returns_false_on_exception(self):
+        driver = MagicMock()
+        driver.find_element.side_effect = Exception("element not found")
+        with patch("easyapplybot._make_chrome_driver", return_value=driver):
+            result = open_linkedin_profile(_make_profile())
+        assert result is False
+        driver.quit.assert_called_once()
+
+    def test_browser_ready_event_fired(self):
+        driver = MagicMock()
+        events = []
+        with patch("easyapplybot._make_chrome_driver", return_value=driver):
+            open_linkedin_profile(_make_profile(), on_event=lambda t, d: events.append(t))
+        assert "browser_ready" in events
+
+    def test_login_failed_event_fired(self):
+        driver = MagicMock()
+        driver.find_element.side_effect = Exception("timeout")
+        events = []
+        with patch("easyapplybot._make_chrome_driver", return_value=driver):
+            open_linkedin_profile(_make_profile(), on_event=lambda t, d: events.append(t))
+        assert "login_failed" in events
+
+    def test_previous_browser_closed(self):
+        first_driver = MagicMock()
+        second_driver = MagicMock()
+        drivers = iter([first_driver, second_driver])
+        with patch("easyapplybot._make_chrome_driver", side_effect=lambda: next(drivers)):
+            open_linkedin_profile(_make_profile())
+            open_linkedin_profile(_make_profile())
+        first_driver.quit.assert_called_once()

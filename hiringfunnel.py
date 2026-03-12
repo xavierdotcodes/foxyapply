@@ -14,7 +14,7 @@ from rich.panel import Panel
 from rich.text import Text
 
 from db import get_all_stats, init_db, record_application
-from easyapplybot import DailyLimitReachedException, EasyApplyBot, ProfileConfig, _run_bot
+from easyapplybot import DailyLimitReachedException, EasyApplyBot, ProfileConfig, _run_bot, open_linkedin_profile
 from profiles import delete_profile, list_names, load_profiles, upsert_profile
 
 console = Console()
@@ -144,6 +144,36 @@ def prompt_profile(existing: Optional[dict] = None) -> Optional[dict]:
     return answers
 
 
+def _open_linkedin_action(data: dict) -> None:
+    """Open a browser, log in to LinkedIn, and navigate to the profile URL."""
+    email = data.get("email", "")
+    password = data.get("password", "")
+    if not email or not password:
+        console.print("[yellow]Set email and password first before opening LinkedIn.[/yellow]")
+        return
+    try:
+        cfg = ProfileConfig(**data)
+    except Exception as e:
+        console.print(f"[red]Profile config error: {e}[/red]")
+        return
+
+    done = threading.Event()
+    result_box: list = []
+
+    def _run(cfg=cfg):
+        result_box.append(open_linkedin_profile(cfg))
+        done.set()
+
+    threading.Thread(target=_run, daemon=True).start()
+    with console.status("[cyan]Opening browser and logging in to LinkedIn...[/cyan]"):
+        done.wait()
+
+    if result_box and result_box[0]:
+        console.print("[green]Browser opened — LinkedIn is loaded. The window stays open.[/green]")
+    else:
+        console.print("[red]Failed to log in to LinkedIn. Check your email and password.[/red]")
+
+
 def prompt_profile_edit(existing: dict) -> Optional[dict]:
     """Edit individual profile fields via a picker loop. Returns updated dict or None if cancelled."""
     data = dict(existing)
@@ -153,6 +183,7 @@ def prompt_profile_edit(existing: dict) -> Optional[dict]:
             questionary.Choice(_field_choice_label(fd, data), value=i)
             for i, fd in enumerate(PROFILE_FIELDS)
         ]
+        field_choices.append(questionary.Choice("Open LinkedIn profile in browser", value="open_linkedin"))
         field_choices.append(questionary.Separator())
         field_choices.append(questionary.Choice("Save & exit", value="save"))
         field_choices.append(questionary.Choice("Cancel", value="cancel"))
@@ -161,6 +192,9 @@ def prompt_profile_edit(existing: dict) -> Optional[dict]:
 
         if action is None or action == "cancel":
             return None
+        if action == "open_linkedin":
+            _open_linkedin_action(data)
+            continue
         if action == "save":
             city = data.get("user_city", "").strip()
             state = data.get("user_state", "").strip()

@@ -106,6 +106,27 @@ def setup_logger() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Chrome driver factory
+# ---------------------------------------------------------------------------
+
+def _make_chrome_driver():
+    ua = UserAgent()
+    options = Options()
+    options.add_argument("--start-maximized")
+    options.add_argument("--ignore-certificate-errors")
+    options.add_argument('--no-sandbox')
+    options.add_argument("--disable-extensions")
+    options.add_argument("--disable-blink-features")
+    options.add_argument(f'--user-agent={ua.random}')
+    options.add_argument('--disable-blink-features=AutomationControlled')
+    options.add_experimental_option("useAutomationExtension", False)
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    driver = webdriver.Chrome(options=options)
+    driver.set_page_load_timeout(30)
+    return driver
+
+
+# ---------------------------------------------------------------------------
 # EasyApplyBot
 # ---------------------------------------------------------------------------
 
@@ -181,21 +202,7 @@ class EasyApplyBot:
             return False
 
     def _create_driver(self):
-        ua = UserAgent()
-        user_agent = ua.random
-        options = Options()
-        options.add_argument("--start-maximized")
-        options.add_argument("--ignore-certificate-errors")
-        options.add_argument('--no-sandbox')
-        options.add_argument("--disable-extensions")
-        options.add_argument("--disable-blink-features")
-        options.add_argument(f'--user-agent={user_agent}')
-        options.add_argument('--disable-blink-features=AutomationControlled')
-        options.add_experimental_option("useAutomationExtension", False)
-        options.add_experimental_option("excludeSwitches", ["enable-automation"])
-        driver = webdriver.Chrome(options=options)
-        driver.set_page_load_timeout(30)
-        return driver
+        return _make_chrome_driver()
 
     # ------------------------------------------------------------------
     # Lifecycle helpers
@@ -902,6 +909,55 @@ _bot: Optional[EasyApplyBot] = None
 _bot_thread: Optional[threading.Thread] = None
 _bot_lock = threading.Lock()
 _applying = False
+_profile_browser: Optional[webdriver.Chrome] = None
+
+
+def open_linkedin_profile(config: ProfileConfig, on_event: Optional[Callable] = None) -> bool:
+    """Launch browser, log in to LinkedIn, navigate to profile_url. Returns True on success."""
+    global _profile_browser
+
+    def _emit(event_type, data=None):
+        if on_event:
+            try:
+                on_event(event_type, data or {})
+            except Exception:
+                pass
+
+    if _profile_browser is not None:
+        try:
+            _profile_browser.quit()
+        except Exception:
+            pass
+        _profile_browser = None
+
+    driver = _make_chrome_driver()
+
+    try:
+        driver.get("https://www.linkedin.com/login?trk=guest_homepage-basic_nav-header-signin")
+        user_field = driver.find_element("id", "username")
+        pw_field = driver.find_element("id", "password")
+        login_button = driver.find_element(By.CLASS_NAME, "btn__primary--large")
+        user_field.send_keys(config.email)
+        user_field.send_keys(Keys.TAB)
+        time.sleep(2)
+        pw_field.send_keys(config.password)
+        time.sleep(2)
+        login_button.click()
+        time.sleep(3)
+    except Exception as e:
+        _emit("login_failed", {"error": str(e)})
+        driver.quit()
+        return False
+
+    if config.profile_url:
+        try:
+            driver.get(config.profile_url)
+        except Exception:
+            pass
+
+    _profile_browser = driver
+    _emit("browser_ready")
+    return True
 
 
 def _run_bot(config: ProfileConfig, on_event: Optional[Callable[[str, dict], None]] = None):
