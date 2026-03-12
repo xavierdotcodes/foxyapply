@@ -760,11 +760,11 @@ class EasyApplyBot:
                 except Exception:
                     pass
 
-    def load_page(self, sleep=.5):
+    def load_page(self, sleep=1):
         scroll_page = 0
         while scroll_page < 2000:
             self.browser.execute_script("window.scrollTo(0," + str(scroll_page) + " );")
-            scroll_page += 500
+            scroll_page += 200
             time.sleep(sleep)
         page = BeautifulSoup(self.browser.page_source, "lxml")
         return page
