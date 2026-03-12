@@ -38,7 +38,6 @@ except ImportError:
     _ollama = None  # type: ignore[assignment]
 
 from fake_useragent import UserAgent
-import requests
 from openai import OpenAI
 from dotenv import load_dotenv
 
@@ -170,7 +169,14 @@ class EasyApplyBot:
         """Return True if LinkedIn's daily submission limit notice is present."""
         try:
             elements = self.browser.find_elements(By.CLASS_NAME, "artdeco-inline-feedback__message")
-            return any("limit daily submissions" in el.text.lower() for el in elements)
+            if any("limit daily submissions" in el.text.lower() for el in elements):
+                return True
+            # Modal dialog: "You reached today's Easy Apply limit"
+            dialogs = self.browser.find_elements(
+                By.CSS_SELECTOR, '[data-sdui-screen="com.linkedin.sdui.flagshipnav.jobs.EasyApplyFuseLimitDialogModal"]')
+            if dialogs:
+                return True
+            return False
         except Exception:
             return False
 
@@ -187,7 +193,9 @@ class EasyApplyBot:
         options.add_argument('--disable-blink-features=AutomationControlled')
         options.add_experimental_option("useAutomationExtension", False)
         options.add_experimental_option("excludeSwitches", ["enable-automation"])
-        return webdriver.Chrome(options=options)
+        driver = webdriver.Chrome(options=options)
+        driver.set_page_load_timeout(30)
+        return driver
 
     # ------------------------------------------------------------------
     # Lifecycle helpers
@@ -319,7 +327,8 @@ class EasyApplyBot:
                         return
 
                     count_job += 1
-                    self.get_job_page(jobID)
+                    if self.get_job_page(jobID) is None:
+                        continue
 
                     # Extract title/company for events
                     try:
@@ -387,16 +396,13 @@ class EasyApplyBot:
     # Page / job helpers
     # ------------------------------------------------------------------
 
-    def write_to_file(self, button, jobID, browserTitle, result) -> None:
-        def re_extract(text, pattern):
-            target = re.search(pattern, text)
-            if target:
-                target = target.group(1)
-            return target
-
     def get_job_page(self, jobID):
         job = 'https://www.linkedin.com/jobs/view/' + str(jobID)
-        self.browser.get(job)
+        try:
+            self.browser.get(job)
+        except TimeoutException:
+            log.warning(f"Page load timed out for job {jobID}, skipping")
+            return None
         self.job_page = self.load_page()
         return self.job_page
 
@@ -408,15 +414,7 @@ class EasyApplyBot:
             button = self.browser.find_elements("xpath", '//*[contains(@aria-label, "Easy Apply to") or contains(@aria-label, "LinkedIn Apply to")]')
             if len(button) == 0:
                 return False
-
-            javascript = """
-            let elements = Array.from(document.querySelectorAll('button[aria-label]'));
-            let targetElement = elements.find(el => el.getAttribute('aria-label').includes('Easy Apply to') || el.getAttribute('aria-label').includes('LinkedIn Apply to'));
-            if (targetElement) {
-                targetElement.click();
-            }
-            """
-            self.browser.execute_script(javascript)
+            button[0].click()
             time.sleep(1)
 
             if self._check_daily_limit():
@@ -487,6 +485,7 @@ class EasyApplyBot:
             follow_locator = (By.CSS_SELECTOR, "label[for='follow-company-checkbox']")
 
             submitted = False
+            no_progress_count = 0
             while True:
                 if self.stopped:
                     return False
@@ -509,19 +508,22 @@ class EasyApplyBot:
                             log.info(e)
 
                     if button:
+                        no_progress_count = 0
                         button.click()
-                        time.sleep(random.uniform(1.5, 2.5))
+                        time.sleep(random.uniform(0.5, 1.5))
                         if i in (3, 4):
                             submitted = True
                         if i != 2:
                             break
+                        if button is None:                                                                                                   
+                            no_progress_count += 1                                                                                           
+                            if no_progress_count >= 5:                                                                                       
+                                log.warning("No actionable buttons found after 5 iterations, abandoning application")                        
+                                return False                                                                                                 
+                            time.sleep(1)  
                 if submitted:
                     self.checked_invalid = False
                     log.info("Application Submitted")
-                    try:
-                        requests.get('https://api.pypes.dev/job-application')
-                    except Exception as e:
-                        log.info(f"{e} - cannot send job application to the api")
                     break
 
             time.sleep(random.uniform(1.5, 2.5))
@@ -654,37 +656,46 @@ class EasyApplyBot:
 
         time.sleep(1)
 
-        radio_inputs = self.browser.find_elements(By.XPATH, '//input[@data-test-text-selectable-option__input="Yes"]')
-        for input_element in radio_inputs:
+        # Unified radio fieldset handler — works with any option label format
+        radio_fieldsets = self.browser.find_elements(
+            By.XPATH, '//fieldset[@data-test-form-builder-radio-button-form-component]')
+        for fieldset in radio_fieldsets:
             try:
-                question_text = self.get_radio_question_text(input_element)
+                legend = fieldset.find_element(By.TAG_NAME, 'legend')
+                question_text = legend.text.strip()
                 question_lower = question_text.lower()
-                if any(keyword in question_lower for keyword in ['visa', 'sponsor', 'work authorization', 'citizen']):
-                    no_input = self.browser.find_element(By.XPATH, '//input[@data-test-text-selectable-option__input="No"]')
-                    if no_input:
-                        loc = no_input.location
-                        element_to_click = self.browser.execute_script(
-                            "return document.elementFromPoint(arguments[0], arguments[1]);",
-                            loc['x'], loc['y'])
-                        element_to_click.click()
-                        log.info(f"Selected 'No' for visa-related question: {question_text}")
-                        continue
-                loc = input_element.location
+                inputs = fieldset.find_elements(By.XPATH, './/input[@data-test-text-selectable-option__input]')
+                if not inputs:
+                    continue
+
+                # Pick "no"-starting option for questions that ask if you *need* sponsorship/visa.
+                # Questions asking if you're *eligible/authorized* (i.e. "without sponsorship") want "yes".
+                needs_no = (
+                    any(kw in question_lower for kw in ['visa', 'sponsor', 'work authorization'])
+                    and not any(kw in question_lower for kw in ['eligible', 'without', 'authorized to work', 'able to work'])
+                )
+
+                if needs_no:
+                    target = next(
+                        (i for i in inputs if (i.get_attribute('data-test-text-selectable-option__input') or '').lower().startswith('no')),
+                        None)
+                else:
+                    target = next(
+                        (i for i in inputs if (i.get_attribute('data-test-text-selectable-option__input') or '').lower().startswith('yes')),
+                        None)
+
+                if not target:
+                    continue
+
                 element_to_click = self.browser.execute_script(
-                    "return document.elementFromPoint(arguments[0], arguments[1]);",
-                    loc['x'], loc['y'])
+                    "arguments[0].scrollIntoView({block: 'center'});"
+                    "var r = arguments[0].getBoundingClientRect();"
+                    "return document.elementFromPoint(r.left + r.width/2, r.top + r.height/2);",
+                    target)
                 element_to_click.click()
-                log.info(f"Selected 'Yes' for question: {question_text}")
+                log.info(f"Selected '{target.get_attribute('data-test-text-selectable-option__input')}' for: {question_text}")
             except Exception as e:
-                log.error(f"Error handling radio button: {e}")
-                try:
-                    loc = input_element.location
-                    element_to_click = self.browser.execute_script(
-                        "return document.elementFromPoint(arguments[0], arguments[1]);",
-                        loc['x'], loc['y'])
-                    element_to_click.click()
-                except Exception:
-                    pass
+                log.error(f"Error handling radio fieldset: {e}")
         time.sleep(1)
 
         try:
@@ -693,6 +704,13 @@ class EasyApplyBot:
                 question_text = self.get_select_question_text(inp)
                 question_lower = question_text.lower()
                 select_obj = Select(inp)
+                if "country" in question_lower:
+                    try:
+                        select_obj.select_by_value("UNITED STATES")
+                        log.info(f"Selected 'UNITED STATES' for country question: {question_text}")
+                    except Exception as e:
+                        log.error(f"Could not select UNITED STATES for '{question_text}': {e}")
+                    continue
                 options = select_obj.options
                 for option in options:
                     ot = option.text.lower()
