@@ -13,6 +13,7 @@ from rich.live import Live
 from rich.panel import Panel
 from rich.text import Text
 
+from boards import AVAILABLE_BOARDS, run_profile_all_boards, stop_current as stop_current_board
 from db import get_all_stats, init_db, record_application
 from easyapplybot import DailyLimitReachedException, EasyApplyBot, ProfileConfig, _run_bot, open_linkedin_profile
 from profiles import delete_profile, list_names, load_profiles, upsert_profile
@@ -44,6 +45,7 @@ PROFILE_FIELDS = [
     ("ai_api_key", "API key for selected provider (blank for Ollama)", "text"),
     ("blacklist", "Blacklisted companies (comma-separated)", "text"),
     ("blacklist_titles", "Blacklisted job titles (comma-separated)", "text"),
+    ("job_boards", "Job boards to apply on", "checkbox", AVAILABLE_BOARDS),
 ]
 
 
@@ -73,6 +75,17 @@ def _prompt_single_field(field_def: tuple, current) -> tuple:
     elif kind == "confirm":
         default = bool(current) if isinstance(current, bool) else False
         result = questionary.confirm(label, default=default).ask()
+        if result is None:
+            return True, None
+        return False, result
+
+    elif kind == "checkbox":
+        current_list = current if isinstance(current, list) else []
+        qchoices = [
+            questionary.Choice(c, value=c, checked=(c in current_list))
+            for c in choices
+        ]
+        result = questionary.checkbox(label, choices=qchoices).ask()
         if result is None:
             return True, None
         return False, result
@@ -225,21 +238,40 @@ class BotState:
         self.failed = 0
         self.seen = 0
         self.status = "Starting..."
+        self.current_board = ""   # e.g. "LinkedIn", "Indeed"
         self.log_lines: list = []
         self.stopped = False
         self.daily_limit_hit = False
 
     def on_event(self, event_type: str, data: dict) -> None:
-        if event_type == "bot_started":
-            self.status = "Applying to jobs..."
+        if event_type == "board_started":
+            self.current_board = data.get("display", data.get("board", ""))
+            self.status = f"[{self.current_board}] Starting..."
+        elif event_type == "board_finished":
+            board = data.get("display", data.get("board", ""))
+            result = data.get("result", "")
+            if result == "daily_limit":
+                self.log_lines.append(f"  [{board}] Daily limit reached")
+            elif result == "not_implemented":
+                self.log_lines.append(f"  [{board}] Not yet implemented — see boards/{data.get('board','')}.py")
+            elif result == "error":
+                self.log_lines.append(f"  [{board}] Error — check logs")
+            else:
+                self.log_lines.append(f"  [{board}] Done")
+        elif event_type == "bot_started":
+            self.status = f"[{self.current_board}] Applying to jobs..."
         elif event_type == "bot_stopped":
             reason = data.get("reason", "")
             self.status = f"Stopped: {reason}"
             self.stopped = True
+        elif event_type == "login_manual_required":
+            msg = data.get("message", "Please log in manually in the browser.")
+            self.status = f"[{self.current_board}] Waiting for manual login..."
+            self.log_lines.append(f"  [yellow]{msg}[/yellow]")
         elif event_type == "login_success":
-            self.status = "Logged in. Searching for jobs..."
+            self.status = f"[{self.current_board}] Logged in. Searching..."
         elif event_type == "login_failed":
-            self.status = f"Login failed: {data.get('error', '')}"
+            self.status = f"[{self.current_board}] Login failed: {data.get('error', '')}"
             self.stopped = True
         elif event_type == "job_applying":
             title = data.get("title", "")
@@ -281,8 +313,9 @@ class BotState:
             self.log_lines = self.log_lines[-20:]
 
     def render(self) -> Panel:
+        board_tag = f"  [dim]({self.current_board})[/dim]" if self.current_board else ""
         header = (
-            f"Profile: [bold]{self.profile_name}[/bold]\n"
+            f"Profile: [bold]{self.profile_name}[/bold]{board_tag}\n"
             f"Applied: [green]{self.applied}[/green]  "
             f"Failed: [red]{self.failed}[/red]  "
             f"Seen: {self.seen}\n"
@@ -323,7 +356,11 @@ def _redirect_logs_to_file() -> None:
 
 
 def run_profile_sequence(start_name: str, all_names: list, profiles: dict) -> None:
-    """Run profiles in sequence, rotating to the next when daily limit is hit."""
+    """Run every profile in sequence.
+
+    For each profile all configured job boards run in order before moving to
+    the next profile:  LinkedIn → Indeed → [more boards] → next profile.
+    """
     remaining = [n for n in all_names if n != start_name]
     names_to_try = [start_name] + remaining
 
@@ -341,17 +378,22 @@ def run_profile_sequence(start_name: str, all_names: list, profiles: dict) -> No
             console.print(f"[red]Invalid profile '{name}': {e}[/red]")
             continue
 
+        boards_label = ", ".join(config.job_boards) if config.job_boards else "none"
+        console.print(
+            f"\nRunning profile [bold]{name}[/bold] "
+            f"[dim]({boards_label})[/dim]. "
+            f"Press [bold]Ctrl+C[/bold] to stop.\n"
+        )
+
         state = BotState(name)
         bot_done = threading.Event()
 
         def bot_thread_fn(cfg=config, st=state, done=bot_done):
-            _run_bot(cfg, on_event=st.on_event)
+            run_profile_all_boards(cfg, on_event=st.on_event)
             done.set()
 
         thread = threading.Thread(target=bot_thread_fn, daemon=True)
         thread.start()
-
-        console.print(f"\nRunning profile [bold]{name}[/bold]. Press [bold]Ctrl+C[/bold] to stop.\n")
 
         try:
             with Live(state.render(), refresh_per_second=2, console=console) as live:
@@ -361,7 +403,8 @@ def run_profile_sequence(start_name: str, all_names: list, profiles: dict) -> No
                 live.update(state.render())
         except KeyboardInterrupt:
             console.print("\n[yellow]Stopping bot...[/yellow]")
-            from easyapplybot import _bot
+            stop_current_board()          # signal active board bot
+            from easyapplybot import _bot  # also stop LinkedIn bot if running
             if _bot is not None:
                 _bot.stop()
             thread.join(timeout=15)
@@ -370,16 +413,7 @@ def run_profile_sequence(start_name: str, all_names: list, profiles: dict) -> No
 
         thread.join(timeout=15)
 
-        if state.daily_limit_hit:
-            idx = names_to_try.index(name) + 1
-            if idx < len(names_to_try):
-                console.print(f"[yellow]Switching to profile '{names_to_try[idx]}'...[/yellow]")
-            else:
-                console.print("[yellow]Daily limit reached. No more profiles to try.[/yellow]")
-        else:
-            break  # stopped cleanly — don't rotate
-
-    console.print("[green]Bot stopped.[/green]")
+    console.print("[green]All profiles completed.[/green]")
 
 
 # ---------------------------------------------------------------------------

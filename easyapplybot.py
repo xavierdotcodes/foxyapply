@@ -74,6 +74,7 @@ class ProfileConfig(BaseModel):
     ai_api_key: str = ""
     blacklist: List[str] = []
     blacklist_titles: List[str] = []
+    job_boards: List[str] = ["linkedin"]
 
     @model_validator(mode='before')
     @classmethod
@@ -508,7 +509,15 @@ class EasyApplyBot:
                         try:
                             for element in self.browser.find_elements(error_locator[0], error_locator[1]):
                                 text = element.text
-                                if ("Please enter" in text or "Please make" in text or "Enter a" in text or "Select checkbox to proceed") and not self.checked_invalid:
+                                if "integer" in text.lower() or "whole number" in text.lower():
+                                    try:
+                                        inp = element.find_element(By.XPATH, "./ancestor::div[contains(@class,'fb-dash-form-element')][1]//input")
+                                        inp.clear()
+                                        inp.send_keys(str(self.years_of_experience))
+                                        log.info(f"Replaced non-integer value with years_of_experience due to: {text}")
+                                    except Exception as ie:
+                                        log.debug(f"Could not fix integer field: {ie}")
+                                elif ("Please enter" in text or "Please make" in text or "Enter a" in text or "Select checkbox to proceed") and not self.checked_invalid:
                                     self.fill_invalids()
                                     break
                         except Exception as e:
@@ -682,7 +691,12 @@ class EasyApplyBot:
                     and not any(kw in question_lower for kw in ['eligible', 'without', 'authorized to work', 'able to work'])
                 )
 
-                if needs_no:
+                if any(kw in question_lower for kw in ['citizenship', 'employment eligibility']):
+                    # Select "U.S Citizen / Permanent Resident" if present, otherwise first option
+                    target = next(
+                        (i for i in inputs if 'u.s citizen' in (i.get_attribute('data-test-text-selectable-option__input') or '').lower()),
+                        inputs[0])
+                elif needs_no:
                     target = next(
                         (i for i in inputs if (i.get_attribute('data-test-text-selectable-option__input') or '').lower().startswith('no')),
                         None)
@@ -703,6 +717,27 @@ class EasyApplyBot:
                 log.info(f"Selected '{target.get_attribute('data-test-text-selectable-option__input')}' for: {question_text}")
             except Exception as e:
                 log.error(f"Error handling radio fieldset: {e}")
+        time.sleep(1)
+
+        # Checkbox fieldsets (consent / privacy notices) — always check "I consent"
+        checkbox_fieldsets = self.browser.find_elements(
+            By.XPATH, '//fieldset[@data-test-checkbox-form-component]')
+        for fieldset in checkbox_fieldsets:
+            try:
+                inputs = fieldset.find_elements(
+                    By.XPATH, './/input[@type="checkbox"][@data-test-text-selectable-option__input]')
+                for inp in inputs:
+                    label = (inp.get_attribute('data-test-text-selectable-option__input') or '').lower()
+                    if 'consent' in label or 'agree' in label or 'acknowledge' in label:
+                        if not inp.is_selected():
+                            self.browser.execute_script(
+                                "arguments[0].scrollIntoView({block: 'center'});"
+                                "var r = arguments[0].getBoundingClientRect();"
+                                "document.elementFromPoint(r.left + r.width/2, r.top + r.height/2).click();",
+                                inp)
+                            log.info(f"Checked consent checkbox: {label}")
+            except Exception as e:
+                log.error(f"Error handling checkbox fieldset: {e}")
         time.sleep(1)
 
         try:
@@ -730,7 +765,7 @@ class EasyApplyBot:
                     elif "no" in ot and "require" in question_lower:
                         select_obj.select_by_visible_text(option.text)
                         log.info(f"Selected option '{option.text}' for question: {question_text}")
-                    elif any(word in ot for word in ["confirm", "accept", "acknowledge"]):
+                    elif any(word in ot for word in ["confirm", "accept", "acknowledge", "consent", "human being"]):
                         select_obj.select_by_visible_text(option.text)
                         log.info(f"Selected option '{option.text}' for question: {question_text}")
                     elif ("yes" in ot and "do you require" not in question_lower) or "native" in ot or "U.S." in ot or "us" in ot or "linkedin" in ot or "united states" in ot or "citizen" in ot:
