@@ -1,11 +1,51 @@
 """HiringFunnel – TUI entry point."""
 
+import argparse
+import datetime
 import logging
 import logging.handlers
 import os
+import sys
 import threading
 import time
 from typing import Optional
+
+try:
+    import requests as _requests
+except ImportError:
+    _requests = None
+
+from dotenv import load_dotenv
+load_dotenv()
+
+_PYPES_API_URL = os.environ.get("PYPES_API_URL", "https://api.pypes.dev/client/job-event")
+_CLIENT_SECRET = os.environ.get("CLIENT_SECRET")
+
+
+def _make_pypes_on_event(profile_name: str):
+    """Returns an on_event callback that POSTs to api.pypes.dev when CLIENT_SECRET is set."""
+    if not _CLIENT_SECRET or not _requests:
+        return None
+
+    def on_event(event: str, data: dict):
+        if event not in ("job_applied", "job_failed", "daily_limit_reached"):
+            return
+        try:
+            _requests.post(
+                _PYPES_API_URL,
+                json={
+                    "profile": profile_name,
+                    "event": event,
+                    "occurred_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    **data,
+                },
+                headers={"X-Pypes-Secret": _CLIENT_SECRET},
+                timeout=5,
+            )
+        except Exception:
+            pass  # never crash the bot over telemetry
+
+    return on_event
 
 import questionary
 from rich.console import Console
@@ -17,6 +57,7 @@ from boards import AVAILABLE_BOARDS, run_profile_all_boards, stop_current as sto
 from db import get_all_stats, init_db, record_application
 from easyapplybot import DailyLimitReachedException, EasyApplyBot, ProfileConfig, _run_bot, open_linkedin_profile
 from profiles import delete_profile, list_names, load_profiles, upsert_profile
+from settings import SystemConfig, load_settings, save_settings
 
 console = Console()
 
@@ -36,16 +77,21 @@ PROFILE_FIELDS = [
     ("positions", "Job positions (comma-separated)", "text"),
     ("remote_only", "Remote only?", "confirm"),
     ("profile_url", "LinkedIn profile URL", "text"),
+    ("github_url", "GitHub profile URL (optional)", "text"),
+    ("portfolio_url", "Portfolio / personal website URL (optional)", "text"),
     ("user_city", "City", "text"),
     ("user_state", "State", "text"),
     ("zip_code", "ZIP code", "text"),
     ("years_experience", "Years of experience", "text"),
     ("desired_salary", "Desired salary", "text"),
-    ("ai_provider", "AI provider", "select", ["openai", "anthropic", "gemini", "ollama"]),
-    ("ai_api_key", "API key for selected provider (blank for Ollama)", "text"),
     ("blacklist", "Blacklisted companies (comma-separated)", "text"),
     ("blacklist_titles", "Blacklisted job titles (comma-separated)", "text"),
     ("job_boards", "Job boards to apply on", "checkbox", AVAILABLE_BOARDS),
+]
+
+SETTINGS_FIELDS = [
+    ("ai_provider", "AI provider", "select", ["openai", "anthropic", "gemini", "ollama"]),
+    ("ai_api_key", "API key for selected provider (blank for Ollama)", "text"),
 ]
 
 
@@ -227,6 +273,17 @@ def prompt_profile_edit(existing: dict) -> Optional[dict]:
             data[field_def[0]] = value
 
 
+def prompt_settings_edit(current: dict) -> Optional[dict]:
+    """Prompt for each system setting in sequence. Returns updated dict or None if cancelled."""
+    data = dict(current)
+    for fd in SETTINGS_FIELDS:
+        cancelled, value = _prompt_single_field(fd, data.get(fd[0], ""))
+        if cancelled:
+            return None
+        data[fd[0]] = value
+    return data
+
+
 # ---------------------------------------------------------------------------
 # Run panel
 # ---------------------------------------------------------------------------
@@ -387,9 +444,15 @@ def run_profile_sequence(start_name: str, all_names: list, profiles: dict) -> No
 
         state = BotState(name)
         bot_done = threading.Event()
+        pypes_handler = _make_pypes_on_event(name)
 
-        def bot_thread_fn(cfg=config, st=state, done=bot_done):
-            run_profile_all_boards(cfg, on_event=st.on_event)
+        def _combined_on_event(event: str, data: dict, st=state, ph=pypes_handler):
+            st.on_event(event, data)
+            if ph:
+                ph(event, data)
+
+        def bot_thread_fn(cfg=config, done=bot_done):
+            run_profile_all_boards(cfg, on_event=_combined_on_event)
             done.set()
 
         thread = threading.Thread(target=bot_thread_fn, daemon=True)
@@ -430,11 +493,37 @@ def build_menu_choices(names: list, stats: dict = {}) -> list:
     choices.append(questionary.Choice("Create new profile", value=("create", None)))
     choices.append(questionary.Choice("Edit a profile", value=("edit", None)))
     choices.append(questionary.Choice("Delete a profile", value=("delete", None)))
+    choices.append(questionary.Separator())
+    choices.append(questionary.Choice("Settings", value=("settings", None)))
     choices.append(questionary.Choice("Quit", value=("quit", None)))
     return choices
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(prog="hiringfunnel", add_help=False)
+    parser.add_argument("--run", metavar="PROFILE", default=None,
+                        help="Run a profile non-interactively (no TUI)")
+    parser.add_argument("--headless", action="store_true",
+                        help="Launch Chrome in headless mode (use with --run)")
+    args, _ = parser.parse_known_args()
+
+    if args.headless:
+        os.environ["HIRINGFUNNEL_HEADLESS"] = "1"
+
+    if args.run:
+        profiles = load_profiles()
+        names = list_names()
+        if args.run not in profiles:
+            console.print(
+                f"[red]Profile '{args.run}' not found. "
+                f"Available: {', '.join(names) or 'none'}[/red]"
+            )
+            sys.exit(1)
+        init_db()
+        _redirect_logs_to_file()
+        run_profile_sequence(args.run, names, profiles)
+        return
+
     console.print("[bold blue]HiringFunnel[/bold blue] – LinkedIn Easy Apply Bot\n")
 
     init_db()
@@ -504,6 +593,14 @@ def main() -> None:
             if confirmed:
                 delete_profile(name)
                 console.print(f"[green]Profile '{name}' deleted.[/green]")
+
+        elif action == "settings":
+            current = load_settings()
+            result = prompt_settings_edit(current.model_dump())
+            if result is None:
+                continue
+            save_settings(SystemConfig(**result))
+            console.print("[green]Settings saved.[/green]")
 
 
 if __name__ == "__main__":

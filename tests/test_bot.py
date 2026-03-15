@@ -11,6 +11,7 @@ import pytest
 from pydantic import ValidationError
 
 from easyapplybot import DailyLimitReachedException, EasyApplyBot, ProfileConfig, _run_bot, open_linkedin_profile
+from settings import SystemConfig
 import easyapplybot
 
 
@@ -28,13 +29,13 @@ class TestProfileConfig:
             locations=["Remote"],
             remote_only=True,
             profile_url="https://linkedin.com/in/test",
+            github_url="https://github.com/testuser",
+            portfolio_url="https://testuser.dev",
             user_city="New York",
             user_state="NY",
             zip_code="10001",
             years_experience=5,
             desired_salary=120000,
-            ai_provider="openai",
-            ai_api_key="sk-test",
             blacklist=["Coinbase"],
             blacklist_titles=["intern"],
         )
@@ -46,8 +47,8 @@ class TestProfileConfig:
         assert config.remote_only is True
         assert config.years_experience == 5
         assert config.desired_salary == 120000
-        assert config.ai_provider == "openai"
-        assert config.ai_api_key == "sk-test"
+        assert config.github_url == "https://github.com/testuser"
+        assert config.portfolio_url == "https://testuser.dev"
         assert config.blacklist == ["Coinbase"]
         assert config.blacklist_titles == ["intern"]
 
@@ -58,13 +59,13 @@ class TestProfileConfig:
         assert config.locations == []
         assert config.remote_only is False
         assert config.profile_url == ""
+        assert config.github_url == ""
+        assert config.portfolio_url == ""
         assert config.user_city == ""
         assert config.user_state == ""
         assert config.zip_code == ""
         assert config.years_experience == 0
         assert config.desired_salary == 0
-        assert config.ai_provider == "openai"
-        assert config.ai_api_key == ""
         assert config.blacklist == []
         assert config.blacklist_titles == []
 
@@ -95,6 +96,8 @@ class TestProfileConfig:
         assert "phone_number" in data
         assert "remote_only" in data
         assert "profile_url" in data
+        assert "github_url" in data
+        assert "portfolio_url" in data
         assert "user_city" in data
         assert "user_state" in data
         assert "blacklist" in data
@@ -102,20 +105,32 @@ class TestProfileConfig:
         assert "zip_code" in data
         assert "years_experience" in data
         assert "desired_salary" in data
-        assert "ai_provider" in data
-        assert "ai_api_key" in data
+        assert "ai_provider" not in data
+        assert "ai_api_key" not in data
 
     def test_legacy_openai_api_key_migration(self):
-        """Old profiles with openai_api_key should be silently migrated."""
+        """Old profiles with openai_api_key are silently stripped — no crash, no field."""
         data = {
             "email": "a@b.com",
             "password": "pw",
             "openai_api_key": "sk-legacy",
         }
         config = ProfileConfig(**data)
-        assert config.ai_api_key == "sk-legacy"
-        assert config.ai_provider == "openai"
         assert not hasattr(config, "openai_api_key")
+        assert not hasattr(config, "ai_api_key")
+        assert not hasattr(config, "ai_provider")
+
+    def test_legacy_ai_fields_stripped(self):
+        """Old profiles with ai_provider/ai_api_key don't crash and fields are dropped."""
+        data = {
+            "email": "a@b.com",
+            "password": "pw",
+            "ai_provider": "anthropic",
+            "ai_api_key": "sk-ant-old",
+        }
+        config = ProfileConfig(**data)
+        assert not hasattr(config, "ai_provider")
+        assert not hasattr(config, "ai_api_key")
 
 
 # ---------------------------------------------------------------------------
@@ -136,6 +151,8 @@ class TestGetAppropriateValue:
         stub.desired_salary = "100000"
         stub.years_of_experience = "3"
         stub.linkedin_profile_url = "https://linkedin.com/in/jamesparrish"
+        stub.github_url = "https://github.com/jamesparrish"
+        stub.portfolio_url = "https://jamesparrish.dev"
         stub.checked_invalid = False
 
         stub.get_appropriate_value = EasyApplyBot.get_appropriate_value.__get__(stub)
@@ -193,6 +210,17 @@ class TestGetAppropriateValue:
     def test_linkedin_url(self):
         bot = self._make_bot_stub()
         assert bot.get_appropriate_value("LinkedIn profile URL") == "https://linkedin.com/in/jamesparrish"
+
+    def test_github_url(self):
+        bot = self._make_bot_stub()
+        assert bot.get_appropriate_value("GitHub profile") == "https://github.com/jamesparrish"
+        assert bot.get_appropriate_value("Git Hub URL") == "https://github.com/jamesparrish"
+
+    def test_portfolio_url(self):
+        bot = self._make_bot_stub()
+        assert bot.get_appropriate_value("Portfolio URL") == "https://jamesparrish.dev"
+        assert bot.get_appropriate_value("Personal website") == "https://jamesparrish.dev"
+        assert bot.get_appropriate_value("Personal site") == "https://jamesparrish.dev"
 
     def test_have_you_ever_worked(self):
         bot = self._make_bot_stub()
@@ -283,7 +311,9 @@ class TestRunBotCallback:
         mock_bot = MagicMock()
         mock_bot.start_linkedin.return_value = False
 
-        with patch("easyapplybot.EasyApplyBot", return_value=mock_bot):
+        with patch("easyapplybot.load_settings", return_value=SystemConfig()), \
+             patch.dict("os.environ", {"HIRINGFUNNEL_AI_PROVIDER": "openai"}), \
+             patch("easyapplybot.EasyApplyBot", return_value=mock_bot):
             _run_bot(config, on_event=handler)
 
         event_types = [e[0] for e in events]
@@ -307,7 +337,9 @@ class TestRunBotCallback:
         mock_bot.start_linkedin.return_value = True
         mock_bot.start_apply.return_value = None
 
-        with patch("easyapplybot.EasyApplyBot", return_value=mock_bot):
+        with patch("easyapplybot.load_settings", return_value=SystemConfig()), \
+             patch.dict("os.environ", {"HIRINGFUNNEL_AI_PROVIDER": "openai"}), \
+             patch("easyapplybot.EasyApplyBot", return_value=mock_bot):
             _run_bot(config, on_event=handler)
 
         event_types = [e[0] for e in events]
@@ -329,7 +361,9 @@ class TestRunBotCallback:
         mock_bot = MagicMock()
         mock_bot.start_linkedin.return_value = True
 
-        with patch("easyapplybot.EasyApplyBot", return_value=mock_bot):
+        with patch("easyapplybot.load_settings", return_value=SystemConfig()), \
+             patch.dict("os.environ", {"HIRINGFUNNEL_AI_PROVIDER": "openai"}), \
+             patch("easyapplybot.EasyApplyBot", return_value=mock_bot):
             _run_bot(config, on_event=handler)
 
         event_types = [e[0] for e in events]
@@ -461,12 +495,14 @@ class TestCrossPlatformJSONEncoding:
 class TestLLMProviderRouting:
     """Test that get_llm_suggested_answer routes to the correct helper."""
 
-    def _make_bot_stub(self, provider="openai"):
+    def _make_bot_stub(self):
         stub = MagicMock()
-        stub.config = ProfileConfig(email="a@b.com", password="pw", ai_provider=provider)
+        stub.config = ProfileConfig(email="a@b.com", password="pw")
         stub.location = "New York, NY"
         stub.years_of_experience = "5"
         stub.desired_salary = "120000"
+        stub.github_url = ""
+        stub.portfolio_url = ""
         stub._build_llm_prompt = EasyApplyBot._build_llm_prompt.__get__(stub)
         stub._llm_openai = MagicMock(return_value="openai_answer")
         stub._llm_anthropic = MagicMock(return_value="anthropic_answer")
@@ -476,42 +512,48 @@ class TestLLMProviderRouting:
         return stub
 
     def test_routes_to_openai(self):
-        stub = self._make_bot_stub("openai")
-        result = stub.get_llm_suggested_answer("Years of experience?")
+        stub = self._make_bot_stub()
+        with patch.dict("os.environ", {"HIRINGFUNNEL_AI_PROVIDER": "openai"}):
+            result = stub.get_llm_suggested_answer("Years of experience?")
         stub._llm_openai.assert_called_once()
         stub._llm_anthropic.assert_not_called()
         assert result == "openai_answer"
 
     def test_routes_to_anthropic(self):
-        stub = self._make_bot_stub("anthropic")
-        result = stub.get_llm_suggested_answer("Years of experience?")
+        stub = self._make_bot_stub()
+        with patch.dict("os.environ", {"HIRINGFUNNEL_AI_PROVIDER": "anthropic"}):
+            result = stub.get_llm_suggested_answer("Years of experience?")
         stub._llm_anthropic.assert_called_once()
         stub._llm_openai.assert_not_called()
         assert result == "anthropic_answer"
 
     def test_routes_to_gemini(self):
-        stub = self._make_bot_stub("gemini")
-        result = stub.get_llm_suggested_answer("Years of experience?")
+        stub = self._make_bot_stub()
+        with patch.dict("os.environ", {"HIRINGFUNNEL_AI_PROVIDER": "gemini"}):
+            result = stub.get_llm_suggested_answer("Years of experience?")
         stub._llm_gemini.assert_called_once()
         stub._llm_openai.assert_not_called()
         assert result == "gemini_answer"
 
     def test_routes_to_ollama(self):
-        stub = self._make_bot_stub("ollama")
-        result = stub.get_llm_suggested_answer("Years of experience?")
+        stub = self._make_bot_stub()
+        with patch.dict("os.environ", {"HIRINGFUNNEL_AI_PROVIDER": "ollama"}):
+            result = stub.get_llm_suggested_answer("Years of experience?")
         stub._llm_ollama.assert_called_once()
         stub._llm_openai.assert_not_called()
         assert result == "ollama_answer"
 
     def test_unknown_provider_returns_empty(self):
-        stub = self._make_bot_stub("unknown")
-        result = stub.get_llm_suggested_answer("Years of experience?")
+        stub = self._make_bot_stub()
+        with patch.dict("os.environ", {"HIRINGFUNNEL_AI_PROVIDER": "unknown"}):
+            result = stub.get_llm_suggested_answer("Years of experience?")
         assert result == ""
 
     def test_exception_returns_empty(self):
-        stub = self._make_bot_stub("openai")
+        stub = self._make_bot_stub()
         stub._llm_openai.side_effect = RuntimeError("API down")
-        result = stub.get_llm_suggested_answer("Years of experience?")
+        with patch.dict("os.environ", {"HIRINGFUNNEL_AI_PROVIDER": "openai"}):
+            result = stub.get_llm_suggested_answer("Years of experience?")
         assert result == ""
 
 
@@ -607,7 +649,9 @@ class TestDailyLimitDetection:
         mock_bot.start_linkedin.return_value = True
         mock_bot.start_apply.side_effect = DailyLimitReachedException("limit reached")
 
-        with patch("easyapplybot.EasyApplyBot", return_value=mock_bot):
+        with patch("easyapplybot.load_settings", return_value=SystemConfig()), \
+             patch.dict("os.environ", {"HIRINGFUNNEL_AI_PROVIDER": "openai"}), \
+             patch("easyapplybot.EasyApplyBot", return_value=mock_bot):
             _run_bot(config, on_event=handler)
 
         event_types = [e[0] for e in events]
@@ -686,3 +730,241 @@ class TestOpenLinkedInProfile:
             open_linkedin_profile(_make_profile())
             open_linkedin_profile(_make_profile())
         first_driver.quit.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Watchdog / deadline tests
+# ---------------------------------------------------------------------------
+
+class TestWatchdog:
+    """Tests for the per-job 60-second timeout watchdog."""
+
+    def _make_send_resume_stub(self):
+        stub = MagicMock()
+        stub.stopped = False
+        stub.checked_invalid = False
+        stub.browser.find_elements.return_value = []
+        stub.send_resume = EasyApplyBot.send_resume.__get__(stub)
+        return stub
+
+    def test_send_resume_raises_timeout_on_expired_deadline(self):
+        """Deadline already past → TimeoutError on first iteration."""
+        stub = self._make_send_resume_stub()
+        with patch("time.sleep"):
+            with pytest.raises(TimeoutError):
+                stub.send_resume(deadline=0.0)  # epoch = already expired
+
+    def test_send_resume_no_deadline_does_not_raise(self):
+        """No deadline → falls through to no_progress escape (returns False)."""
+        stub = self._make_send_resume_stub()
+        with patch("time.sleep"):
+            result = stub.send_resume(deadline=None)
+        assert result is False
+
+    def test_no_progress_count_returns_false_after_5_empty_iterations(self):
+        """Dead code is now live: 5 iterations with no button → return False."""
+        stub = self._make_send_resume_stub()
+        with patch("time.sleep"):
+            result = stub.send_resume(deadline=None)
+        assert result is False
+
+
+# ---------------------------------------------------------------------------
+# _dismiss_modal tests
+# ---------------------------------------------------------------------------
+
+class TestDismissModal:
+    """Tests for the modal-dismiss helper used after timeouts."""
+
+    def _make_stub(self):
+        stub = MagicMock()
+        stub._dismiss_modal = EasyApplyBot._dismiss_modal.__get__(stub)
+        return stub
+
+    def test_dismiss_modal_clicks_dismiss_button_when_present(self):
+        stub = self._make_stub()
+        dismiss_btn = MagicMock()
+        stub.browser.find_element.return_value = dismiss_btn
+        stub._dismiss_modal()
+        dismiss_btn.click.assert_called_once()
+
+    def test_dismiss_modal_falls_back_to_escape_when_no_button(self):
+        stub = self._make_stub()
+        stub.browser.find_element.side_effect = Exception("no element")
+        # Should not raise even when all attempts fail
+        stub._dismiss_modal()
+
+
+# ---------------------------------------------------------------------------
+# LLM options= parameter tests
+# ---------------------------------------------------------------------------
+
+class TestLLMRadioFallback:
+    """Tests for the options= radio-choice prompt path in get_llm_suggested_answer."""
+
+    def _make_stub(self):
+        stub = MagicMock()
+        stub.config = ProfileConfig(email="a@b.com", password="pw")
+        stub.location = "New York, NY"
+        stub.years_of_experience = "5"
+        stub.desired_salary = "120000"
+        stub.github_url = ""
+        stub.portfolio_url = ""
+        stub._build_llm_prompt = EasyApplyBot._build_llm_prompt.__get__(stub)
+        stub._llm_openai = MagicMock(return_value="Yes")
+        stub._llm_anthropic = MagicMock(return_value="Yes")
+        stub._llm_gemini = MagicMock(return_value="Yes")
+        stub._llm_ollama = MagicMock(return_value="Yes")
+        stub.get_llm_suggested_answer = EasyApplyBot.get_llm_suggested_answer.__get__(stub)
+        return stub
+
+    def test_options_param_builds_radio_prompt(self):
+        """When options= is given, _llm_* receives a choice-style prompt."""
+        stub = self._make_stub()
+        options = ["Yes", "No", "Unsure"]
+        with patch.dict("os.environ", {"HIRINGFUNNEL_AI_PROVIDER": "openai"}):
+            stub.get_llm_suggested_answer("Are you authorized to work?", options=options)
+        call_prompt = stub._llm_openai.call_args[0][0]
+        assert "Are you authorized to work?" in call_prompt
+        assert "Yes" in call_prompt
+        assert "No" in call_prompt
+
+    def test_options_prompt_does_not_include_numeric_shortcut(self):
+        """Radio prompt must NOT contain the 'answer with only a digit' instruction
+        (that instruction is for text inputs and would break option matching)."""
+        stub = self._make_stub()
+        options = ["Less than 1 year", "1-3 years", "3-5 years", "5+ years"]
+        with patch.dict("os.environ", {"HIRINGFUNNEL_AI_PROVIDER": "openai"}):
+            stub.get_llm_suggested_answer("Years of experience?", options=options)
+        call_prompt = stub._llm_openai.call_args[0][0]
+        assert "single numeric digit" not in call_prompt
+
+    def test_no_options_still_uses_text_prompt(self):
+        """Without options=, _build_llm_prompt() is used as before."""
+        stub = self._make_stub()
+        stub._llm_openai.return_value = "5"
+        with patch.dict("os.environ", {"HIRINGFUNNEL_AI_PROVIDER": "openai"}):
+            result = stub.get_llm_suggested_answer("Years of experience?")
+        call_prompt = stub._llm_openai.call_args[0][0]
+        # Text prompt includes the persona / numeric shortcut instruction
+        assert "years of experience" in call_prompt.lower()
+        assert result == "5"
+
+
+# ---------------------------------------------------------------------------
+# _build_llm_prompt tests
+# ---------------------------------------------------------------------------
+
+class TestBuildLLMPrompt:
+    """Tests for github_url/portfolio_url appearing in the LLM prompt."""
+
+    def _make_stub(self, github_url="", portfolio_url=""):
+        stub = MagicMock()
+        stub.config = ProfileConfig(email="jane@example.com", password="pw", positions=["SWE"])
+        stub.location = "Austin, TX"
+        stub.years_of_experience = "4"
+        stub.desired_salary = "130000"
+        stub.github_url = github_url
+        stub.portfolio_url = portfolio_url
+        stub._build_llm_prompt = EasyApplyBot._build_llm_prompt.__get__(stub)
+        return stub
+
+    def test_github_url_included_when_set(self):
+        stub = self._make_stub(github_url="https://github.com/jane")
+        prompt = stub._build_llm_prompt("How many years experience?")
+        assert "https://github.com/jane" in prompt
+
+    def test_portfolio_url_included_when_set(self):
+        stub = self._make_stub(portfolio_url="https://jane.dev")
+        prompt = stub._build_llm_prompt("Any personal site?")
+        assert "https://jane.dev" in prompt
+
+    def test_neither_url_included_when_empty(self):
+        stub = self._make_stub()
+        prompt = stub._build_llm_prompt("Question?")
+        assert "GitHub" not in prompt
+        assert "Portfolio" not in prompt
+
+
+# ---------------------------------------------------------------------------
+# Headless env var tests
+# ---------------------------------------------------------------------------
+
+class TestHeadlessMode:
+    """Tests for HIRINGFUNNEL_HEADLESS env var → Chrome --headless=new."""
+
+    def test_headless_env_var_adds_headless_arg(self):
+        import easyapplybot
+        captured = []
+
+        def fake_chrome(options=None):
+            captured.append(options)
+            drv = MagicMock()
+            drv.set_page_load_timeout = MagicMock()
+            return drv
+
+        with patch.dict("os.environ", {"HIRINGFUNNEL_HEADLESS": "1"}):
+            with patch("easyapplybot.webdriver.Chrome", side_effect=fake_chrome):
+                with patch("easyapplybot.UserAgent"):
+                    easyapplybot._make_chrome_driver()
+
+        assert captured, "Chrome was not instantiated"
+        args = captured[0].arguments
+        assert "--headless=new" in args
+
+    def test_no_headless_env_var_does_not_add_headless_arg(self):
+        import easyapplybot
+        captured = []
+
+        def fake_chrome(options=None):
+            captured.append(options)
+            drv = MagicMock()
+            drv.set_page_load_timeout = MagicMock()
+            return drv
+
+        env = {k: v for k, v in os.environ.items() if k != "HIRINGFUNNEL_HEADLESS"}
+        with patch.dict("os.environ", env, clear=True):
+            with patch("easyapplybot.webdriver.Chrome", side_effect=fake_chrome):
+                with patch("easyapplybot.UserAgent"):
+                    easyapplybot._make_chrome_driver()
+
+        args = captured[0].arguments
+        assert "--headless=new" not in args
+
+
+# ---------------------------------------------------------------------------
+# CLI --run flag tests
+# ---------------------------------------------------------------------------
+
+class TestCLIRunFlag:
+    """Tests for --run <profile> and --headless CLI flags."""
+
+    def test_run_flag_unknown_profile_exits_nonzero(self, monkeypatch):
+        """--run with a profile name not in profiles.json → sys.exit(1)."""
+        import hiringfunnel
+        monkeypatch.setattr(hiringfunnel, "load_profiles", lambda: {})
+        monkeypatch.setattr(hiringfunnel, "list_names", lambda: [])
+
+        with patch("sys.argv", ["hiringfunnel", "--run", "NonExistentProfile"]):
+            with pytest.raises(SystemExit) as exc_info:
+                hiringfunnel.main()
+        assert exc_info.value.code == 1
+
+    def test_run_flag_known_profile_calls_run_profile_sequence(self, monkeypatch):
+        """--run with a valid profile calls run_profile_sequence and returns."""
+        import hiringfunnel
+        profile_data = {"email": "a@b.com", "password": "pw", "positions": ["SWE"], "locations": ["Remote"]}
+        monkeypatch.setattr(hiringfunnel, "load_profiles", lambda: {"TestClient": profile_data})
+        monkeypatch.setattr(hiringfunnel, "list_names", lambda: ["TestClient"])
+        monkeypatch.setattr(hiringfunnel, "init_db", lambda: None)
+        monkeypatch.setattr(hiringfunnel, "_redirect_logs_to_file", lambda: None)
+
+        calls = []
+        monkeypatch.setattr(hiringfunnel, "run_profile_sequence",
+                            lambda *a, **kw: calls.append((a, kw)))
+
+        with patch("sys.argv", ["hiringfunnel", "--run", "TestClient"]):
+            hiringfunnel.main()
+
+        assert len(calls) == 1
+        assert calls[0][0][0] == "TestClient"  # start_name arg

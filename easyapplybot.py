@@ -1,3 +1,4 @@
+import datetime
 import logging
 import os
 import random
@@ -41,6 +42,10 @@ from fake_useragent import UserAgent
 from openai import OpenAI
 from dotenv import load_dotenv
 
+from settings import _inject_ai_env, load_settings
+
+load_dotenv()  # load .env regardless of entry point (hiringfunnel.py, run_profiles_batch.py, etc.)
+
 log = logging.getLogger(__name__)
 
 
@@ -70,8 +75,8 @@ class ProfileConfig(BaseModel):
     zip_code: str = ""
     years_experience: int = 0
     desired_salary: int = 0
-    ai_provider: str = "openai"   # "openai" | "anthropic" | "gemini" | "ollama"
-    ai_api_key: str = ""
+    github_url: str = ""
+    portfolio_url: str = ""
     blacklist: List[str] = []
     blacklist_titles: List[str] = []
     job_boards: List[str] = ["linkedin"]
@@ -79,9 +84,14 @@ class ProfileConfig(BaseModel):
     @model_validator(mode='before')
     @classmethod
     def _migrate_legacy(cls, data):
-        if isinstance(data, dict) and 'openai_api_key' in data and 'ai_api_key' not in data:
-            data['ai_api_key'] = data.pop('openai_api_key')
-            data.setdefault('ai_provider', 'openai')
+        if isinstance(data, dict):
+            # openai_api_key → ai_api_key (old field name)
+            if 'openai_api_key' in data and 'ai_api_key' not in data:
+                data['ai_api_key'] = data.pop('openai_api_key')
+                data.setdefault('ai_provider', 'openai')
+            # ai_provider + ai_api_key moved to system settings (settings.json)
+            data.pop('ai_provider', None)
+            data.pop('ai_api_key', None)
         return data
 
 
@@ -122,6 +132,10 @@ def _make_chrome_driver():
     options.add_argument('--disable-blink-features=AutomationControlled')
     options.add_experimental_option("useAutomationExtension", False)
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    if os.environ.get("HIRINGFUNNEL_HEADLESS") == "1":
+        options.add_argument("--headless=new")
+        options.add_argument("--disable-gpu")
+        options.add_argument("--window-size=1920,1080")
     driver = webdriver.Chrome(options=options)
     driver.set_page_load_timeout(30)
     return driver
@@ -139,23 +153,6 @@ class EasyApplyBot:
 
         self._on_event = on_event
 
-        _PROVIDER_ENV = {
-            "openai": "OPENAI_API_KEY",
-            "anthropic": "ANTHROPIC_API_KEY",
-            "gemini": "GOOGLE_API_KEY",
-        }
-        if config.ai_api_key:
-            env_var = _PROVIDER_ENV.get(config.ai_provider.lower())
-            if env_var:
-                os.environ[env_var] = config.ai_api_key
-        else:
-            load_dotenv()
-
-        if config.ai_provider.lower() != "ollama" and not os.environ.get(
-            _PROVIDER_ENV.get(config.ai_provider.lower(), "")
-        ):
-            log.warning("AI API key not set – LLM fallback will be disabled")
-
         log.info("Welcome to Easy Apply Bot")
 
         self._stop_event = threading.Event()
@@ -169,6 +166,8 @@ class EasyApplyBot:
         self.years_of_experience = str(config.years_experience) if config.years_experience else ""
         self.desired_salary = str(config.desired_salary) if config.desired_salary else ""
         self.linkedin_profile_url = config.profile_url
+        self.github_url = config.github_url
+        self.portfolio_url = config.portfolio_url
         self.zip_code = config.zip_code
         self.user_state = config.user_state
         self.checked_invalid = False
@@ -255,11 +254,7 @@ class EasyApplyBot:
     # ------------------------------------------------------------------
 
     def fill_data(self) -> None:
-        try:
-            self.browser.set_window_size(1, 1)
-            self.browser.set_window_position(2000, 2000)
-        except Exception as e:
-            log.info(f"Could not set window size/position: {e}")
+        pass
 
     def start_apply(self, positions, locations) -> None:
         self.fill_data()
@@ -364,14 +359,27 @@ class EasyApplyBot:
                     if button is not False:
                         log.info("Clicking the EASY apply button")
                         time.sleep(3)
-                        result = self.send_resume()
-                        count_application += 1
-                        if result:
-                            self.applied_count += 1
-                            self._emit("job_applied", {"job_id": str(jobID), "title": job_title, "company": company})
-                        else:
+                        try:
+                            result = self.send_resume(deadline=time.time() + 600)
+                            count_application += 1
+                            if result:
+                                self.applied_count += 1
+                                self._emit("job_applied", {"job_id": str(jobID), "title": job_title, "company": company})
+                            else:
+                                self.failed_count += 1
+                                self._emit("job_failed", {"job_id": str(jobID), "title": job_title, "error": "submit failed"})
+                        except TimeoutError:
                             self.failed_count += 1
-                            self._emit("job_failed", {"job_id": str(jobID), "title": job_title, "error": "submit failed"})
+                            self._emit("job_failed", {"job_id": str(jobID), "title": job_title, "company": company, "error": "timeout"})
+                            self._dismiss_modal()
+                            continue
+                        except DailyLimitReachedException:
+                            raise
+                        except Exception as e:
+                            log.warning(f"Exception applying to job {jobID}: {e}")
+                            self.failed_count += 1
+                            self._emit("job_failed", {"job_id": str(jobID), "title": job_title, "company": company, "error": str(e)})
+                            continue
                     else:
                         log.info("The button does not exist.")
                         result = False
@@ -476,7 +484,26 @@ class EasyApplyBot:
         except Exception:
             log.debug("Could not find phone number field")
 
-    def send_resume(self) -> bool:
+    def _dismiss_modal(self) -> None:
+        """Attempt to dismiss any open Easy Apply modal after a timeout or error."""
+        for selector in [
+            "button[aria-label='Dismiss']",
+            "button[aria-label='Cancel']",
+        ]:
+            try:
+                btn = self.browser.find_element(By.CSS_SELECTOR, selector)
+                btn.click()
+                time.sleep(0.5)
+                return
+            except Exception:
+                pass
+        # Fallback: send Escape key to close any open overlay
+        try:
+            self.browser.find_element(By.TAG_NAME, "body").send_keys(Keys.ESCAPE)
+        except Exception:
+            pass
+
+    def send_resume(self, deadline: Optional[float] = None) -> bool:
         def is_present(button_locator) -> bool:
             return len(self.browser.find_elements(button_locator[0], button_locator[1])) > 0
 
@@ -495,6 +522,8 @@ class EasyApplyBot:
             submitted = False
             no_progress_count = 0
             while True:
+                if deadline is not None and time.time() > deadline:
+                    raise TimeoutError("Job application timed out")
                 if self.stopped:
                     return False
 
@@ -531,12 +560,12 @@ class EasyApplyBot:
                             submitted = True
                         if i != 2:
                             break
-                        if button is None:                                                                                                   
-                            no_progress_count += 1                                                                                           
-                            if no_progress_count >= 5:                                                                                       
-                                log.warning("No actionable buttons found after 5 iterations, abandoning application")                        
-                                return False                                                                                                 
-                            time.sleep(1)  
+                if button is None:
+                    no_progress_count += 1
+                    if no_progress_count >= 15:
+                        log.warning("No actionable buttons found after 15 iterations, abandoning application")
+                        return False
+                    time.sleep(1)
                 if submitted:
                     self.checked_invalid = False
                     log.info("Application Submitted")
@@ -606,6 +635,10 @@ class EasyApplyBot:
             return 'Bachelor'
         if any(keyword in label_lower for keyword in ['linkedin', 'linked-in', 'linked in']):
             return self.linkedin_profile_url
+        if any(keyword in label_lower for keyword in ['github', 'git hub']):
+            return self.github_url
+        if any(keyword in label_lower for keyword in ['portfolio', 'personal site', 'personal website', 'website']):
+            return self.portfolio_url
 
         if input_type == "text":
             llm_answer = self.get_llm_suggested_answer(label_text, input_type)
@@ -623,6 +656,7 @@ class EasyApplyBot:
 
         if location:
             location.send_keys(self.location)
+            time.sleep(1)
             try:
                 dropdown_option = WebDriverWait(self.browser, 10).until(
                     EC.element_to_be_clickable((
@@ -648,9 +682,20 @@ class EasyApplyBot:
             name = self.config.email.split('@')[0].replace('.', ' ').replace('_', ' ').title()
             input_element.send_keys(name)
 
-        text_inputs = self.browser.find_elements(By.XPATH, '//input[contains(@class, "fb-dash-form-element")]')
+        text_inputs = self.browser.find_elements(By.XPATH,
+            '//input[contains(@class, "fb-dash-form-element") '
+            'or contains(@class, "artdeco-text-input--input")]')
         for input_element in text_inputs:
             try:
+                # Date picker inputs (name="artdeco-date", placeholder mm/dd/yyyy)
+                if input_element.get_attribute('name') == 'artdeco-date' or \
+                        (input_element.get_attribute('placeholder') or '').startswith('mm/dd'):
+                    start_date = (datetime.date.today() + datetime.timedelta(weeks=2)).strftime('%m/%d/%Y')
+                    input_element.clear()
+                    input_element.send_keys(start_date)
+                    log.info(f"Filled date picker with: {start_date}")
+                    continue
+
                 label_text = self.get_field_label(input_element)
                 input_type = input_element.get_attribute('type') or 'text'
                 appropriate_value = self.get_appropriate_value(label_text, input_type)
@@ -691,11 +736,26 @@ class EasyApplyBot:
                     and not any(kw in question_lower for kw in ['eligible', 'without', 'authorized to work', 'able to work'])
                 )
 
-                if any(kw in question_lower for kw in ['citizenship', 'employment eligibility']):
+                # For any fieldset, prefer "I don't wish to answer" / "I prefer not to answer" if present
+                _decline_option = next(
+                    (i for i in inputs if any(kw in (i.get_attribute('data-test-text-selectable-option__input') or '').lower()
+                                              for kw in ["don't wish", "do not wish", "prefer not", "decline to"])),
+                    None)
+
+                if _decline_option:
+                    target = _decline_option
+                elif any(kw in question_lower for kw in ['citizenship', 'employment eligibility']):
                     # Select "U.S Citizen / Permanent Resident" if present, otherwise first option
                     target = next(
                         (i for i in inputs if 'u.s citizen' in (i.get_attribute('data-test-text-selectable-option__input') or '').lower()),
                         inputs[0])
+                elif any(kw in question_lower for kw in ['acknowledge', 'confidential', 'consent', 'declare', 'privacy notice']):
+                    # Consent/acknowledgment statement — pick the affirmative option (no "not" in label)
+                    def _is_affirmative(inp):
+                        lbl = (inp.get_attribute('data-test-text-selectable-option__input') or '').lower()
+                        return any(kw in lbl for kw in ['acknowledge', 'agree', 'consent', 'understand']) \
+                               and 'not' not in lbl and 'do not' not in lbl
+                    target = next((i for i in inputs if _is_affirmative(i)), inputs[0])
                 elif needs_no:
                     target = next(
                         (i for i in inputs if (i.get_attribute('data-test-text-selectable-option__input') or '').lower().startswith('no')),
@@ -706,7 +766,22 @@ class EasyApplyBot:
                         None)
 
                 if not target:
-                    continue
+                    # LLM fallback for unrecognized radio question
+                    option_texts = [
+                        i.get_attribute('data-test-text-selectable-option__input') or ''
+                        for i in inputs
+                    ]
+                    option_texts = [t for t in option_texts if t]
+                    if option_texts:
+                        llm_answer = self.get_llm_suggested_answer(question_text, options=option_texts)
+                        if llm_answer:
+                            target = next(
+                                (i for i in inputs if llm_answer.lower() in
+                                 (i.get_attribute('data-test-text-selectable-option__input') or '').lower()),
+                                None,
+                            )
+                    if not target:
+                        continue
 
                 element_to_click = self.browser.execute_script(
                     "arguments[0].scrollIntoView({block: 'center'});"
@@ -719,23 +794,66 @@ class EasyApplyBot:
                 log.error(f"Error handling radio fieldset: {e}")
         time.sleep(1)
 
-        # Checkbox fieldsets (consent / privacy notices) — always check "I consent"
+        # Checkbox fieldsets — consent notices and referral source questions
         checkbox_fieldsets = self.browser.find_elements(
             By.XPATH, '//fieldset[@data-test-checkbox-form-component]')
         for fieldset in checkbox_fieldsets:
             try:
+                legend_text = ''
+                try:
+                    legend_text = fieldset.find_element(By.TAG_NAME, 'legend').text.lower()
+                except Exception:
+                    pass
+
                 inputs = fieldset.find_elements(
                     By.XPATH, './/input[@type="checkbox"][@data-test-text-selectable-option__input]')
-                for inp in inputs:
-                    label = (inp.get_attribute('data-test-text-selectable-option__input') or '').lower()
-                    if 'consent' in label or 'agree' in label or 'acknowledge' in label:
-                        if not inp.is_selected():
-                            self.browser.execute_script(
-                                "arguments[0].scrollIntoView({block: 'center'});"
-                                "var r = arguments[0].getBoundingClientRect();"
-                                "document.elementFromPoint(r.left + r.width/2, r.top + r.height/2).click();",
-                                inp)
-                            log.info(f"Checked consent checkbox: {label}")
+                if not inputs:
+                    continue
+
+                def _click_checkbox(inp):
+                    if not inp.is_selected():
+                        self.browser.execute_script(
+                            "arguments[0].scrollIntoView({block: 'center'});"
+                            "var r = arguments[0].getBoundingClientRect();"
+                            "document.elementFromPoint(r.left + r.width/2, r.top + r.height/2).click();",
+                            inp)
+
+                # Consent / privacy / declaration → check matching option or first available
+                if any(kw in legend_text for kw in ['consent', 'agree', 'acknowledge', 'declare', 'privacy', 'understand']):
+                    target = next(
+                        (inp for inp in inputs
+                         if any(kw in (inp.get_attribute('data-test-text-selectable-option__input') or '').lower()
+                                for kw in ['consent', 'agree', 'acknowledge', 'understand'])),
+                        inputs[0])
+                    _click_checkbox(target)
+                    log.info(f"Checked consent checkbox: {target.get_attribute('data-test-text-selectable-option__input')}")
+
+                # "How did you hear about us?" → prefer LinkedIn, fall back to first option
+                elif any(kw in legend_text for kw in ['hear about', 'how did you find', 'referral', 'source']):
+                    labels = [(inp.get_attribute('data-test-text-selectable-option__input') or '').lower()
+                              for inp in inputs]
+                    target = next(
+                        (inputs[i] for i, l in enumerate(labels) if 'linkedin' in l),
+                        inputs[0])
+                    _click_checkbox(target)
+                    log.info(f"Selected referral source: {target.get_attribute('data-test-text-selectable-option__input')}")
+
+                # Security clearance → select "Never held a clearance" or last option (lowest level)
+                elif any(kw in legend_text for kw in ['clearance', 'security clearance', 'secret', 'classified']):
+                    labels = [(inp.get_attribute('data-test-text-selectable-option__input') or '').lower()
+                              for inp in inputs]
+                    target = next(
+                        (inputs[i] for i, l in enumerate(labels) if 'never' in l),
+                        inputs[-1])
+                    _click_checkbox(target)
+                    log.info(f"Selected clearance option: {target.get_attribute('data-test-text-selectable-option__input')}")
+
+                # Unrecognized required checkbox fieldset → check first option to unblock
+                else:
+                    if not any(inp.is_selected() for inp in inputs):
+                        _click_checkbox(inputs[0])
+                        log.info(f"Checked first option on unrecognized checkbox fieldset: {legend_text!r}")
+
             except Exception as e:
                 log.error(f"Error handling checkbox fieldset: {e}")
         time.sleep(1)
@@ -754,23 +872,65 @@ class EasyApplyBot:
                         log.error(f"Could not select UNITED STATES for '{question_text}': {e}")
                     continue
                 options = select_obj.options
-                for option in options:
-                    ot = option.text.lower()
-                    if "united states" in ot:
-                        select_obj.select_by_visible_text(option.text)
-                        log.info(f"Selected option '{option.text}' for question: {question_text}")
-                    elif "immediate family" in question_lower and "no" in ot:
-                        select_obj.select_by_visible_text(option.text)
-                        log.info(f"Selected option '{option.text}' for question: {question_text}")
-                    elif "no" in ot and "require" in question_lower:
-                        select_obj.select_by_visible_text(option.text)
-                        log.info(f"Selected option '{option.text}' for question: {question_text}")
-                    elif any(word in ot for word in ["confirm", "accept", "acknowledge", "consent", "human being"]):
-                        select_obj.select_by_visible_text(option.text)
-                        log.info(f"Selected option '{option.text}' for question: {question_text}")
-                    elif ("yes" in ot and "do you require" not in question_lower) or "native" in ot or "U.S." in ot or "us" in ot or "linkedin" in ot or "united states" in ot or "citizen" in ot:
-                        select_obj.select_by_visible_text(option.text)
-                        log.info(f"Selected option '{option.text}' for question: {question_text}")
+                non_placeholder = [o for o in options if (o.get_attribute('value') or '').lower() not in ('select an option', '', 'select')]
+                selected = False
+
+                # Experience/years range: pick the bucket that fits years_of_experience
+                if any(kw in question_lower for kw in ['years of experience', 'years experience', 'years of industry', 'how many years']):
+                    yoe_str = str(self.years_of_experience).strip()
+                    yoe = int(yoe_str) if yoe_str.isdigit() else 0
+                    for opt in non_placeholder:
+                        ot = opt.text
+                        range_match = re.search(r'(\d+)\s*[-–]\s*(\d+)', ot)
+                        plus_match = re.search(r'(\d+)\+', ot)
+                        if range_match:
+                            lo, hi = int(range_match.group(1)), int(range_match.group(2))
+                            if lo <= yoe <= hi:
+                                select_obj.select_by_visible_text(opt.text)
+                                log.info(f"Selected experience range '{opt.text}' for: {question_text}")
+                                selected = True
+                                break
+                        elif plus_match:
+                            lo = int(plus_match.group(1))
+                            if yoe >= lo:
+                                select_obj.select_by_visible_text(opt.text)
+                                log.info(f"Selected experience range '{opt.text}' for: {question_text}")
+                                selected = True
+                                break
+                    if not selected and non_placeholder:
+                        # No bucket matched — pick the last option (highest range)
+                        select_obj.select_by_visible_text(non_placeholder[-1].text)
+                        log.info(f"Selected last experience option '{non_placeholder[-1].text}' for: {question_text}")
+                        selected = True
+
+                if not selected:
+                    for option in options:
+                        ot = option.text.lower()
+                        if "united states" in ot:
+                            select_obj.select_by_visible_text(option.text)
+                            log.info(f"Selected option '{option.text}' for question: {question_text}")
+                            selected = True
+                        elif "immediate family" in question_lower and "no" in ot:
+                            select_obj.select_by_visible_text(option.text)
+                            log.info(f"Selected option '{option.text}' for question: {question_text}")
+                            selected = True
+                        elif "no" in ot and "require" in question_lower:
+                            select_obj.select_by_visible_text(option.text)
+                            log.info(f"Selected option '{option.text}' for question: {question_text}")
+                            selected = True
+                        elif any(word in ot for word in ["confirm", "accept", "acknowledge", "consent", "human being"]):
+                            select_obj.select_by_visible_text(option.text)
+                            log.info(f"Selected option '{option.text}' for question: {question_text}")
+                            selected = True
+                        elif ("yes" in ot and "do you require" not in question_lower) or "native" in ot or "U.S." in ot or "us" in ot or "linkedin" in ot or "united states" in ot or "citizen" in ot:
+                            select_obj.select_by_visible_text(option.text)
+                            log.info(f"Selected option '{option.text}' for question: {question_text}")
+                            selected = True
+
+                # Fallback: nothing matched — pick first non-placeholder option to unblock
+                if not selected and non_placeholder:
+                    select_obj.select_by_visible_text(non_placeholder[0].text)
+                    log.info(f"Selected first available option '{non_placeholder[0].text}' for unrecognized question: {question_text}")
         except Exception as e:
             select_inputs = None
 
@@ -859,32 +1019,34 @@ class EasyApplyBot:
         location_str = self.location or "United States"
         yoe = self.years_of_experience or "3"
         salary = self.desired_salary or "100000"
+        extra = ""
+        if self.github_url:
+            extra += f"\nGitHub: {self.github_url}"
+        if self.portfolio_url:
+            extra += f"\nPortfolio/website: {self.portfolio_url}"
         return (
             f"You are {name}, a professional applying for jobs as a {positions_str} "
-            f"based in {location_str} with {yoe} years of experience. "
+            f"based in {location_str} with {yoe} years of experience.{extra} "
             f"Provide a short, succinct, professional answer for the following job application question: "
             f"'{label_text}'. If it so much as mentions numerics such as experience or hourly wage, how long have you been.. etc... "
             f"answer with ONLY a single numeric digit response and no additional text: {yoe} for years of experience, and {salary} for salary."
         )
 
-    def _llm_openai(self, label_text):
+    def _llm_openai(self, prompt: str) -> str:
         openai_api_key = os.environ.get("OPENAI_API_KEY")
         if not openai_api_key:
             return ""
         client = OpenAI(api_key=openai_api_key)
-        prompt = self._build_llm_prompt(label_text)
         response = client.responses.create(
             model="gpt-4o",
-            instructions=prompt,
-            input=label_text,
+            input=prompt,
         )
         return response.output_text.strip()
 
-    def _llm_anthropic(self, label_text):
+    def _llm_anthropic(self, prompt: str) -> str:
         if _anthropic is None:
             log.warning("anthropic package not installed – skipping LLM fallback")
             return ""
-        prompt = self._build_llm_prompt(label_text)
         client = _anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
         response = client.messages.create(
             model="claude-haiku-4-5-20251001",
@@ -893,38 +1055,44 @@ class EasyApplyBot:
         )
         return response.content[0].text.strip()
 
-    def _llm_gemini(self, label_text):
+    def _llm_gemini(self, prompt: str) -> str:
         if _genai is None:
             log.warning("google-generativeai package not installed – skipping LLM fallback")
             return ""
-        prompt = self._build_llm_prompt(label_text)
         _genai.configure(api_key=os.environ.get("GOOGLE_API_KEY", ""))
         model = _genai.GenerativeModel("gemini-2.0-flash")
         response = model.generate_content(prompt)
         return response.text.strip()
 
-    def _llm_ollama(self, label_text):
+    def _llm_ollama(self, prompt: str) -> str:
         if _ollama is None:
             log.warning("ollama package not installed – skipping LLM fallback")
             return ""
-        prompt = self._build_llm_prompt(label_text)
         response = _ollama.chat(
             model="llama3.2",
             messages=[{"role": "user", "content": prompt}],
         )
         return response["message"]["content"].strip()
 
-    def get_llm_suggested_answer(self, label_text, input_type="text"):
-        provider = self.config.ai_provider.lower()
+    def get_llm_suggested_answer(self, label_text: str, input_type: str = "text", options: Optional[List[str]] = None) -> str:
+        provider = os.environ.get("HIRINGFUNNEL_AI_PROVIDER", "openai").lower()
+        if options:
+            prompt = (
+                f"Job application form question: {label_text}\n"
+                f"Options: {', '.join(options)}\n"
+                f"Reply with ONLY the exact option text that best applies. No explanation."
+            )
+        else:
+            prompt = self._build_llm_prompt(label_text)
         try:
             if provider == "openai":
-                answer = self._llm_openai(label_text)
+                answer = self._llm_openai(prompt)
             elif provider == "anthropic":
-                answer = self._llm_anthropic(label_text)
+                answer = self._llm_anthropic(prompt)
             elif provider == "gemini":
-                answer = self._llm_gemini(label_text)
+                answer = self._llm_gemini(prompt)
             elif provider == "ollama":
-                answer = self._llm_ollama(label_text)
+                answer = self._llm_ollama(prompt)
             else:
                 log.warning(f"Unknown AI provider '{provider}' – skipping LLM fallback")
                 return ""
@@ -998,6 +1166,8 @@ def open_linkedin_profile(config: ProfileConfig, on_event: Optional[Callable] = 
 def _run_bot(config: ProfileConfig, on_event: Optional[Callable[[str, dict], None]] = None):
     """Target function for the bot background thread."""
     global _bot, _applying
+    # Inject AI provider + key into os.environ before constructing the bot
+    _inject_ai_env(load_settings())
     try:
         _bot = EasyApplyBot(config, on_event=on_event)
 
