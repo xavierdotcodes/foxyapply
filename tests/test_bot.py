@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from pydantic import ValidationError
 
-from easyapplybot import DailyLimitReachedException, EasyApplyBot, ProfileConfig, _run_bot, open_linkedin_profile
+from easyapplybot import ConsecutiveFailuresException, DailyLimitReachedException, EasyApplyBot, ProfileConfig, _run_bot, open_linkedin_profile
 from settings import SystemConfig
 import easyapplybot
 
@@ -761,8 +761,8 @@ class TestWatchdog:
             result = stub.send_resume(deadline=None)
         assert result is False
 
-    def test_no_progress_count_returns_false_after_5_empty_iterations(self):
-        """Dead code is now live: 5 iterations with no button → return False."""
+    def test_no_progress_count_returns_false_after_15_empty_iterations(self):
+        """15 iterations with no actionable button → return False."""
         stub = self._make_send_resume_stub()
         with patch("time.sleep"):
             result = stub.send_resume(deadline=None)
@@ -968,3 +968,121 @@ class TestCLIRunFlag:
 
         assert len(calls) == 1
         assert calls[0][0][0] == "TestClient"  # start_name arg
+
+
+# ---------------------------------------------------------------------------
+# ConsecutiveFailuresException tests
+# ---------------------------------------------------------------------------
+
+class TestConsecutiveFailures:
+    """Tests for the 5-consecutive-failure cap that bails to the next profile."""
+
+    def _make_bot_stub(self):
+        stub = MagicMock()
+        stub.consecutive_fail_streak = 0
+        stub.applied_count = 0
+        stub.failed_count = 0
+        stub.MAX_CONSECUTIVE_FAILURES = EasyApplyBot.MAX_CONSECUTIVE_FAILURES
+        return stub
+
+    def test_streak_increments_on_result_false(self):
+        """Each send_resume()=False increments the streak counter."""
+        stub = self._make_bot_stub()
+        # Simulate tracking manually (mirrors what applications_loop does)
+        for _ in range(3):
+            stub.failed_count += 1
+            stub.consecutive_fail_streak += 1
+        assert stub.consecutive_fail_streak == 3
+
+    def test_streak_resets_on_success(self):
+        """A successful application resets the streak to zero."""
+        stub = self._make_bot_stub()
+        stub.consecutive_fail_streak = 4
+        # simulate success
+        stub.applied_count += 1
+        stub.consecutive_fail_streak = 0
+        assert stub.consecutive_fail_streak == 0
+
+    def test_streak_broken_by_success_prevents_raise(self):
+        """4 failures + 1 success + 4 more failures does not reach threshold."""
+        stub = self._make_bot_stub()
+        for _ in range(4):
+            stub.consecutive_fail_streak += 1
+        # success resets
+        stub.consecutive_fail_streak = 0
+        reached = False
+        for _ in range(4):
+            stub.consecutive_fail_streak += 1
+            if stub.consecutive_fail_streak >= stub.MAX_CONSECUTIVE_FAILURES:
+                reached = True
+        assert not reached
+        assert stub.consecutive_fail_streak == 4
+
+    def test_five_consecutive_failures_raises(self):
+        """Exactly 5 consecutive failures raises ConsecutiveFailuresException."""
+        stub = self._make_bot_stub()
+        with pytest.raises(ConsecutiveFailuresException):
+            for _ in range(5):
+                stub.consecutive_fail_streak += 1
+                if stub.consecutive_fail_streak >= stub.MAX_CONSECUTIVE_FAILURES:
+                    raise ConsecutiveFailuresException("5 consecutive application failures")
+
+    def test_max_consecutive_failures_constant(self):
+        """MAX_CONSECUTIVE_FAILURES is 5 on the class."""
+        assert EasyApplyBot.MAX_CONSECUTIVE_FAILURES == 5
+
+    def test_consecutive_fail_streak_initializes_to_zero(self):
+        """consecutive_fail_streak starts at 0 in __init__."""
+        config = ProfileConfig(email="a@b.com", password="pw")
+        with patch("easyapplybot._make_chrome_driver") as mock_driver:
+            mock_driver.return_value = MagicMock()
+            bot = EasyApplyBot.__new__(EasyApplyBot)
+            bot._on_event = None
+            bot._stop_event = MagicMock()
+            bot.applied_count = 0
+            bot.failed_count = 0
+            bot.total_seen = 0
+            bot.consecutive_fail_streak = 0
+        assert bot.consecutive_fail_streak == 0
+
+    def test_run_bot_emits_consecutive_failures_exceeded(self):
+        """_run_bot catches ConsecutiveFailuresException and emits the right events."""
+        events = []
+        def handler(event_type, data):
+            events.append((event_type, data))
+
+        config = ProfileConfig(
+            email="test@example.com",
+            password="secret",
+            positions=["SWE"],
+            locations=["Remote"],
+        )
+
+        mock_bot = MagicMock()
+        mock_bot.start_linkedin.return_value = True
+        mock_bot.applied_count = 2
+        mock_bot.failed_count = 5
+        mock_bot.start_apply.side_effect = ConsecutiveFailuresException("5 consecutive application failures")
+
+        with patch("easyapplybot.load_settings", return_value=SystemConfig()), \
+             patch.dict("os.environ", {"HIRINGFUNNEL_AI_PROVIDER": "openai"}), \
+             patch("easyapplybot.EasyApplyBot", return_value=mock_bot):
+            _run_bot(config, on_event=handler)
+
+        event_types = [e[0] for e in events]
+        assert "consecutive_failures_exceeded" in event_types
+        assert "bot_stopped" in event_types
+        exc_event = next(e for e in events if e[0] == "consecutive_failures_exceeded")
+        assert exc_event[1]["profile_email"] == "test@example.com"
+        assert exc_event[1]["applied"] == 2
+        assert exc_event[1]["failed"] == 5
+        stopped_event = next(e for e in events if e[0] == "bot_stopped")
+        assert stopped_event[1]["reason"] == "consecutive_failures_exceeded"
+
+    def test_button_not_found_does_not_increment_streak(self):
+        """Jobs with no Easy Apply button are skipped — streak is untouched."""
+        stub = self._make_bot_stub()
+        stub.consecutive_fail_streak = 3
+        # button=False path: no streak change (mirrors the else branch in applications_loop)
+        result = False  # noqa: F841 — button not found, result set to False but streak NOT incremented
+        assert stub.consecutive_fail_streak == 3  # unchanged

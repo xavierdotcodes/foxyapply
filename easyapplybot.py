@@ -58,6 +58,11 @@ class DailyLimitReachedException(Exception):
     pass
 
 
+class ConsecutiveFailuresException(Exception):
+    """Raised when the bot fails to apply to MAX_CONSECUTIVE_FAILURES jobs in a row."""
+    pass
+
+
 # ---------------------------------------------------------------------------
 # Pydantic model
 # ---------------------------------------------------------------------------
@@ -147,6 +152,7 @@ def _make_chrome_driver():
 
 class EasyApplyBot:
     MAX_SEARCH_TIME = 20 * 60 * 60
+    MAX_CONSECUTIVE_FAILURES = 5
 
     def __init__(self, config: ProfileConfig, on_event: Optional[Callable[[str, dict], None]] = None) -> None:
         setup_logger()
@@ -159,6 +165,7 @@ class EasyApplyBot:
         self.applied_count = 0
         self.failed_count = 0
         self.total_seen = 0
+        self.consecutive_fail_streak = 0
 
         self.config = config
         self.phone_number = config.phone_number
@@ -364,21 +371,33 @@ class EasyApplyBot:
                             count_application += 1
                             if result:
                                 self.applied_count += 1
+                                self.consecutive_fail_streak = 0
                                 self._emit("job_applied", {"job_id": str(jobID), "title": job_title, "company": company})
                             else:
                                 self.failed_count += 1
                                 self._emit("job_failed", {"job_id": str(jobID), "title": job_title, "error": "submit failed"})
+                                self.consecutive_fail_streak += 1
+                                if self.consecutive_fail_streak >= self.MAX_CONSECUTIVE_FAILURES:
+                                    raise ConsecutiveFailuresException(f"{self.MAX_CONSECUTIVE_FAILURES} consecutive application failures")
                         except TimeoutError:
                             self.failed_count += 1
                             self._emit("job_failed", {"job_id": str(jobID), "title": job_title, "company": company, "error": "timeout"})
                             self._dismiss_modal()
+                            self.consecutive_fail_streak += 1
+                            if self.consecutive_fail_streak >= self.MAX_CONSECUTIVE_FAILURES:
+                                raise ConsecutiveFailuresException(f"{self.MAX_CONSECUTIVE_FAILURES} consecutive application failures")
                             continue
                         except DailyLimitReachedException:
+                            raise
+                        except ConsecutiveFailuresException:
                             raise
                         except Exception as e:
                             log.warning(f"Exception applying to job {jobID}: {e}")
                             self.failed_count += 1
                             self._emit("job_failed", {"job_id": str(jobID), "title": job_title, "company": company, "error": str(e)})
+                            self.consecutive_fail_streak += 1
+                            if self.consecutive_fail_streak >= self.MAX_CONSECUTIVE_FAILURES:
+                                raise ConsecutiveFailuresException(f"{self.MAX_CONSECUTIVE_FAILURES} consecutive application failures")
                             continue
                     else:
                         log.info("The button does not exist.")
@@ -403,6 +422,8 @@ class EasyApplyBot:
                         self.browser, jobs_per_page = self.next_jobs_page(position, location, jobs_per_page)
 
             except DailyLimitReachedException:
+                raise
+            except ConsecutiveFailuresException:
                 raise
             except Exception as e:
                 log.error(f"Exception in main application loop: {e}")
@@ -665,6 +686,7 @@ class EasyApplyBot:
                     ))
                 )
                 dropdown_option.click()
+                time.sleep(1)
             except Exception:
                 pass
             return
@@ -775,13 +797,24 @@ class EasyApplyBot:
                     if option_texts:
                         llm_answer = self.get_llm_suggested_answer(question_text, options=option_texts)
                         if llm_answer:
+                            def _norm(s):
+                                return re.sub(r'[–—−]', '-', s).lower()
+                            # Try substring match, then dash-normalized match
                             target = next(
                                 (i for i in inputs if llm_answer.lower() in
                                  (i.get_attribute('data-test-text-selectable-option__input') or '').lower()),
                                 None,
                             )
+                            if not target:
+                                target = next(
+                                    (i for i in inputs if _norm(llm_answer) in _norm(
+                                        i.get_attribute('data-test-text-selectable-option__input') or '')),
+                                    None,
+                                )
                     if not target:
-                        continue
+                        # Last resort: pick first option to unblock form rather than leaving blank
+                        target = inputs[0]
+                        log.warning(f"No match for radio question '{question_text}' — selecting first option")
 
                 element_to_click = self.browser.execute_script(
                     "arguments[0].scrollIntoView({block: 'center'});"
@@ -866,10 +899,18 @@ class EasyApplyBot:
                 select_obj = Select(inp)
                 if "country" in question_lower:
                     try:
-                        select_obj.select_by_value("UNITED STATES")
-                        log.info(f"Selected 'UNITED STATES' for country question: {question_text}")
+                        us_opt = next(
+                            (o for o in select_obj.options
+                             if o.get_attribute('value').lower() == 'united states'),
+                            None
+                        )
+                        if us_opt:
+                            select_obj.select_by_visible_text(us_opt.text)
+                            log.info(f"Selected '{us_opt.text}' for country question: {question_text}")
+                        else:
+                            log.warning(f"'United States' not found in options for: {question_text}")
                     except Exception as e:
-                        log.error(f"Could not select UNITED STATES for '{question_text}': {e}")
+                        log.error(f"Could not select country for '{question_text}': {e}")
                     continue
                 options = select_obj.options
                 non_placeholder = [o for o in options if (o.get_attribute('value') or '').lower() not in ('select an option', '', 'select')]
@@ -1202,6 +1243,15 @@ def _run_bot(config: ProfileConfig, on_event: Optional[Callable[[str, dict], Non
         if on_event:
             on_event("daily_limit_reached", {"profile_email": config.email})
             on_event("bot_stopped", {"reason": "daily_limit_reached"})
+    except ConsecutiveFailuresException:
+        log.warning(f"{EasyApplyBot.MAX_CONSECUTIVE_FAILURES} consecutive failures for {config.email}, moving to next profile")
+        if on_event:
+            on_event("consecutive_failures_exceeded", {
+                "profile_email": config.email,
+                "applied": _bot.applied_count if _bot else 0,
+                "failed": _bot.failed_count if _bot else 0,
+            })
+            on_event("bot_stopped", {"reason": "consecutive_failures_exceeded"})
     except Exception as e:
         log.error(f"Bot thread exception: {e}")
         if on_event:

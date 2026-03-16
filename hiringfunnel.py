@@ -28,7 +28,7 @@ def _make_pypes_on_event(profile_name: str):
         return None
 
     def on_event(event: str, data: dict):
-        if event not in ("job_applied", "job_failed", "daily_limit_reached"):
+        if event not in ("job_applied", "job_failed", "daily_limit_reached", "consecutive_failures_exceeded"):
             return
         try:
             _requests.post(
@@ -361,6 +361,10 @@ class BotState:
             email = data.get("profile_email", "this profile")
             self.status = f"Daily limit reached for {email}"
             self.log_lines.append(f"  [yellow]Daily limit reached[/yellow] for {email}")
+        elif event_type == "consecutive_failures_exceeded":
+            email = data.get("profile_email", "this profile")
+            self.status = f"Consecutive failure limit hit for {email}"
+            self.log_lines.append(f"  [red]5 consecutive failures[/red] for {email}, moving on")
         elif event_type == "error":
             msg = data.get("message", "")
             self.log_lines.append(f"  [red]Error[/red]: {msg}")
