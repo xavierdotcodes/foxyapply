@@ -126,3 +126,32 @@ def test_inject_unknown_provider_no_key_set():
         os.environ.pop("HIRINGFUNNEL_AI_PROVIDER", None)
         _inject_ai_env(cfg)  # should not raise
         assert os.environ["HIRINGFUNNEL_AI_PROVIDER"] == "ollama"
+
+
+# ---------------------------------------------------------------------------
+# blacklist / blacklist_titles in SystemConfig
+# ---------------------------------------------------------------------------
+
+def test_load_settings_with_blacklist(tmp_path):
+    """blacklist and blacklist_titles round-trip through settings.json."""
+    f = tmp_path / "settings.json"
+    f.write_text(json.dumps({
+        "ai_provider": "openai",
+        "ai_api_key": "",
+        "blacklist": ["Coinbase", "Meta"],
+        "blacklist_titles": ["intern", "junior"],
+    }))
+    with patch("settings.SETTINGS_FILE", f):
+        cfg = load_settings()
+    assert cfg.blacklist == ["Coinbase", "Meta"]
+    assert cfg.blacklist_titles == ["intern", "junior"]
+
+
+def test_load_settings_blacklist_defaults_to_empty(tmp_path):
+    """settings.json without blacklist keys defaults to empty lists (old file compat)."""
+    f = tmp_path / "settings.json"
+    f.write_text(json.dumps({"ai_provider": "openai", "ai_api_key": ""}))
+    with patch("settings.SETTINGS_FILE", f):
+        cfg = load_settings()
+    assert cfg.blacklist == []
+    assert cfg.blacklist_titles == []

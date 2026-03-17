@@ -84,14 +84,14 @@ PROFILE_FIELDS = [
     ("zip_code", "ZIP code", "text"),
     ("years_experience", "Years of experience", "text"),
     ("desired_salary", "Desired salary", "text"),
-    ("blacklist", "Blacklisted companies (comma-separated)", "text"),
-    ("blacklist_titles", "Blacklisted job titles (comma-separated)", "text"),
     ("job_boards", "Job boards to apply on", "checkbox", AVAILABLE_BOARDS),
 ]
 
 SETTINGS_FIELDS = [
     ("ai_provider", "AI provider", "select", ["openai", "anthropic", "gemini", "ollama"]),
     ("ai_api_key", "API key for selected provider (blank for Ollama)", "text"),
+    ("blacklist", "Blacklisted companies (comma-separated)", "text"),
+    ("blacklist_titles", "Blacklisted job titles (comma-separated)", "text"),
 ]
 
 

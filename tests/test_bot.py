@@ -36,8 +36,6 @@ class TestProfileConfig:
             zip_code="10001",
             years_experience=5,
             desired_salary=120000,
-            blacklist=["Coinbase"],
-            blacklist_titles=["intern"],
         )
         assert config.email == "test@example.com"
         assert config.password == "secret"
@@ -49,8 +47,6 @@ class TestProfileConfig:
         assert config.desired_salary == 120000
         assert config.github_url == "https://github.com/testuser"
         assert config.portfolio_url == "https://testuser.dev"
-        assert config.blacklist == ["Coinbase"]
-        assert config.blacklist_titles == ["intern"]
 
     def test_defaults(self):
         config = ProfileConfig(email="a@b.com", password="pw")
@@ -66,8 +62,6 @@ class TestProfileConfig:
         assert config.zip_code == ""
         assert config.years_experience == 0
         assert config.desired_salary == 0
-        assert config.blacklist == []
-        assert config.blacklist_titles == []
 
     def test_missing_email_raises(self):
         with pytest.raises(ValidationError):
@@ -100,8 +94,8 @@ class TestProfileConfig:
         assert "portfolio_url" in data
         assert "user_city" in data
         assert "user_state" in data
-        assert "blacklist" in data
-        assert "blacklist_titles" in data
+        assert "blacklist" not in data
+        assert "blacklist_titles" not in data
         assert "zip_code" in data
         assert "years_experience" in data
         assert "desired_salary" in data
@@ -131,6 +125,18 @@ class TestProfileConfig:
         config = ProfileConfig(**data)
         assert not hasattr(config, "ai_provider")
         assert not hasattr(config, "ai_api_key")
+
+    def test_legacy_blacklist_stripped(self):
+        """Old profiles with blacklist/blacklist_titles don't crash and fields are dropped."""
+        data = {
+            "email": "a@b.com",
+            "password": "pw",
+            "blacklist": ["Coinbase", "Meta"],
+            "blacklist_titles": ["intern"],
+        }
+        config = ProfileConfig(**data)
+        assert not hasattr(config, "blacklist")
+        assert not hasattr(config, "blacklist_titles")
 
 
 # ---------------------------------------------------------------------------

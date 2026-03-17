@@ -20,6 +20,7 @@ import json
 import logging
 import os
 from pathlib import Path
+from typing import List
 
 from pydantic import BaseModel
 
@@ -42,6 +43,8 @@ class SystemConfig(BaseModel):
 
     ai_provider: str = "openai"  # "openai" | "anthropic" | "gemini" | "ollama"
     ai_api_key: str = ""
+    blacklist: List[str] = []
+    blacklist_titles: List[str] = []
 
 
 def load_settings() -> SystemConfig:

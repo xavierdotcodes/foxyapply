@@ -82,8 +82,6 @@ class ProfileConfig(BaseModel):
     desired_salary: int = 0
     github_url: str = ""
     portfolio_url: str = ""
-    blacklist: List[str] = []
-    blacklist_titles: List[str] = []
     job_boards: List[str] = ["linkedin"]
 
     @model_validator(mode='before')
@@ -97,6 +95,9 @@ class ProfileConfig(BaseModel):
             # ai_provider + ai_api_key moved to system settings (settings.json)
             data.pop('ai_provider', None)
             data.pop('ai_api_key', None)
+            # blacklist + blacklist_titles moved to system settings (settings.json)
+            data.pop('blacklist', None)
+            data.pop('blacklist_titles', None)
         return data
 
 
@@ -154,7 +155,8 @@ class EasyApplyBot:
     MAX_SEARCH_TIME = 20 * 60 * 60
     MAX_CONSECUTIVE_FAILURES = 5
 
-    def __init__(self, config: ProfileConfig, on_event: Optional[Callable[[str, dict], None]] = None) -> None:
+    def __init__(self, config: ProfileConfig, on_event: Optional[Callable[[str, dict], None]] = None,
+                 blacklist: Optional[List[str]] = None, blacklist_titles: Optional[List[str]] = None) -> None:
         setup_logger()
 
         self._on_event = on_event
@@ -178,8 +180,8 @@ class EasyApplyBot:
         self.zip_code = config.zip_code
         self.user_state = config.user_state
         self.checked_invalid = False
-        self.blacklist = [c.lower() for c in config.blacklist]
-        self.blacklist_titles = [t.lower() for t in config.blacklist_titles]
+        self.blacklist = [c.lower() for c in (blacklist or [])]
+        self.blacklist_titles = [t.lower() for t in (blacklist_titles or [])]
 
         # Setup Selenium driver
         self.browser = self._create_driver()
@@ -710,7 +712,7 @@ class EasyApplyBot:
                 # Date picker inputs (name="artdeco-date", placeholder mm/dd/yyyy)
                 if input_element.get_attribute('name') == 'artdeco-date' or \
                         (input_element.get_attribute('placeholder') or '').startswith('mm/dd'):
-                    start_date = (datetime.date.today() + datetime.timedelta(weeks=2)).strftime('%m/%d/%Y')
+                    start_date = (datetime.date.today() + datetime.timedelta(weeks=2)).strftime('%-m/%-d/%Y')
                     input_element.clear()
                     input_element.send_keys(start_date)
                     log.info(f"Filled date picker with: {start_date}")
@@ -1205,9 +1207,12 @@ def _run_bot(config: ProfileConfig, on_event: Optional[Callable[[str, dict], Non
     """Target function for the bot background thread."""
     global _bot, _applying
     # Inject AI provider + key into os.environ before constructing the bot
-    _inject_ai_env(load_settings())
+    settings = load_settings()
+    _inject_ai_env(settings)
     try:
-        _bot = EasyApplyBot(config, on_event=on_event)
+        _bot = EasyApplyBot(config, on_event=on_event,
+                            blacklist=settings.blacklist,
+                            blacklist_titles=settings.blacklist_titles)
 
         if not _bot.start_linkedin(config.email, config.password):
             if on_event:

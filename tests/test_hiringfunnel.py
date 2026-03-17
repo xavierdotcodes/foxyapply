@@ -341,12 +341,19 @@ class TestPromptSingleField:
             _, val = _prompt_single_field(fd, [])
         assert val == ["SWE", "SRE"]
 
-    def test_blacklist_field_parsed_to_list(self):
-        fd = ("blacklist", "Blacklist", "text")
+    def test_blacklist_settings_field_parsed_to_list(self):
+        """blacklist is now a settings field — _prompt_single_field still parses it to a list."""
+        fd = ("blacklist", "Blacklisted companies (comma-separated)", "text")
         with patch("hiringfunnel.questionary.text") as m:
             m.return_value.ask.return_value = "Acme, Initech"
             _, val = _prompt_single_field(fd, [])
         assert val == ["Acme", "Initech"]
+
+    def test_profile_fields_has_no_blacklist(self):
+        """After moving blacklist to system settings, PROFILE_FIELDS must not contain them."""
+        field_names = [fd[0] for fd in PROFILE_FIELDS]
+        assert "blacklist" not in field_names
+        assert "blacklist_titles" not in field_names
 
     def test_list_current_displayed_as_csv(self):
         fd = ("positions", "Positions", "text")
