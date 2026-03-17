@@ -28,12 +28,16 @@ class JobBoardBot(ABC):
         self,
         config: "ProfileConfig",
         on_event: Optional[Callable[[str, dict], None]] = None,
+        blacklist: Optional[List[str]] = None,
+        blacklist_titles: Optional[List[str]] = None,
     ) -> None:
         self.config = config
         self._on_event = on_event
         self._stop_event = threading.Event()
         self.applied_count = 0
         self.failed_count = 0
+        self.blacklist: List[str] = blacklist or []
+        self.blacklist_titles: List[str] = blacklist_titles or []
 
     # ------------------------------------------------------------------
     # Stop control

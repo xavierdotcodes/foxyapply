@@ -80,6 +80,11 @@ def run_profile_all_boards(
     """
     global _current_bot
     from easyapplybot import DailyLimitReachedException
+    from settings import _inject_ai_env, load_settings
+
+    # Load system settings (blacklist, AI provider, etc.) and inject env vars
+    settings = load_settings()
+    _inject_ai_env(settings)
 
     def emit(event_type: str, data: dict = {}) -> None:
         if on_event:
@@ -105,7 +110,11 @@ def run_profile_all_boards(
 
     for board_name in boards:
         BotClass = registry[board_name]
-        bot = BotClass(config, on_event=on_event)
+        bot = BotClass(
+            config, on_event=on_event,
+            blacklist=settings.blacklist,
+            blacklist_titles=settings.blacklist_titles,
+        )
         _current_bot = bot
 
         emit("board_started", {"board": board_name, "display": BotClass.display_name})

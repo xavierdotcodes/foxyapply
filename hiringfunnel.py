@@ -18,7 +18,8 @@ except ImportError:
 from dotenv import load_dotenv
 load_dotenv()
 
-_PYPES_API_URL = os.environ.get("PYPES_API_URL", "https://api.pypes.dev/client/job-event")
+_PYPES_BASE_URL = os.environ.get("PYPES_BASE_URL", "https://api.pypes.dev")
+_PYPES_API_URL = os.environ.get("PYPES_API_URL", f"{_PYPES_BASE_URL}/client/job-event")
 _CLIENT_SECRET = os.environ.get("CLIENT_SECRET")
 
 
@@ -76,6 +77,7 @@ PROFILE_FIELDS = [
     ("phone_number", "Phone number", "text"),
     ("positions", "Job positions (comma-separated)", "text"),
     ("remote_only", "Remote only?", "confirm"),
+    ("requires_visa", "Require H-1B sponsorship? (visa mode)", "confirm"),
     ("profile_url", "LinkedIn profile URL", "text"),
     ("github_url", "GitHub profile URL (optional)", "text"),
     ("portfolio_url", "Portfolio / personal website URL (optional)", "text"),
@@ -289,7 +291,7 @@ def prompt_settings_edit(current: dict) -> Optional[dict]:
 # ---------------------------------------------------------------------------
 
 class BotState:
-    def __init__(self, profile_name: str):
+    def __init__(self, profile_name: str, requires_visa: bool = False):
         self.profile_name = profile_name
         self.applied = 0
         self.failed = 0
@@ -299,6 +301,9 @@ class BotState:
         self.log_lines: list = []
         self.stopped = False
         self.daily_limit_hit = False
+        self.requires_visa = requires_visa
+        self.h1b_skipped = 0
+        self.h1b_summary_lines: list = []   # populated by h1b_session_summary event
 
     def on_event(self, event_type: str, data: dict) -> None:
         if event_type == "board_started":
@@ -316,6 +321,7 @@ class BotState:
             else:
                 self.log_lines.append(f"  [{board}] Done")
         elif event_type == "bot_started":
+            self.requires_visa = data.get("requires_visa", False)
             self.status = f"[{self.current_board}] Applying to jobs..."
         elif event_type == "bot_stopped":
             reason = data.get("reason", "")
@@ -365,6 +371,15 @@ class BotState:
             email = data.get("profile_email", "this profile")
             self.status = f"Consecutive failure limit hit for {email}"
             self.log_lines.append(f"  [red]5 consecutive failures[/red] for {email}, moving on")
+        elif event_type == "h1b_skipped":
+            self.h1b_skipped += 1
+        elif event_type == "h1b_api_unavailable":
+            msg = data.get("message", "")
+            self.status = "[red]H-1B API unavailable — run aborted[/red]"
+            self.log_lines.append(f"  [red][H-1B ABORT][/red] {msg}")
+            self.stopped = True
+        elif event_type == "h1b_session_summary":
+            self.h1b_summary_lines = data.get("lines", [])
         elif event_type == "error":
             msg = data.get("message", "")
             self.log_lines.append(f"  [red]Error[/red]: {msg}")
@@ -375,13 +390,16 @@ class BotState:
 
     def render(self) -> Panel:
         board_tag = f"  [dim]({self.current_board})[/dim]" if self.current_board else ""
+        visa_badge = "  [yellow][H-1B mode ON][/yellow]" if self.requires_visa else ""
         header = (
-            f"Profile: [bold]{self.profile_name}[/bold]{board_tag}\n"
+            f"Profile: [bold]{self.profile_name}[/bold]{board_tag}{visa_badge}\n"
             f"Applied: [green]{self.applied}[/green]  "
             f"Failed: [red]{self.failed}[/red]  "
             f"Seen: {self.seen}\n"
-            f"Status: {self.status}"
         )
+        if self.requires_visa:
+            header += f"Skipped (no H-1B): [yellow]{self.h1b_skipped}[/yellow]\n"
+        header += f"Status: {self.status}"
         log_text = "\n".join(self.log_lines[-10:]) if self.log_lines else ""
         body = header + ("\n\n" + log_text if log_text else "")
         return Panel(body, title="[bold blue]HiringFunnel[/bold blue]", expand=False)
@@ -446,7 +464,7 @@ def run_profile_sequence(start_name: str, all_names: list, profiles: dict) -> No
             f"Press [bold]Ctrl+C[/bold] to stop.\n"
         )
 
-        state = BotState(name)
+        state = BotState(name, requires_visa=config.requires_visa)
         bot_done = threading.Event()
         pypes_handler = _make_pypes_on_event(name)
 
@@ -479,6 +497,11 @@ def run_profile_sequence(start_name: str, all_names: list, profiles: dict) -> No
             break
 
         thread.join(timeout=15)
+
+        # Print H-1B end-of-run summary if visa mode was active.
+        if state.requires_visa and state.h1b_summary_lines:
+            for line in state.h1b_summary_lines:
+                console.print(line)
 
     console.print("[green]All profiles completed.[/green]")
 

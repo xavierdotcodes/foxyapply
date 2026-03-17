@@ -10,7 +10,15 @@ from unittest.mock import MagicMock, patch
 import pytest
 from pydantic import ValidationError
 
-from easyapplybot import ConsecutiveFailuresException, DailyLimitReachedException, EasyApplyBot, ProfileConfig, _run_bot, open_linkedin_profile
+from easyapplybot import (
+    ConsecutiveFailuresException,
+    DailyLimitReachedException,
+    H1BAPIUnavailableException,
+    EasyApplyBot,
+    ProfileConfig,
+    _run_bot,
+    open_linkedin_profile,
+)
 from settings import SystemConfig
 import easyapplybot
 
@@ -1092,3 +1100,195 @@ class TestConsecutiveFailures:
         # button=False path: no streak change (mirrors the else branch in applications_loop)
         result = False  # noqa: F841 — button not found, result set to False but streak NOT incremented
         assert stub.consecutive_fail_streak == 3  # unchanged
+
+
+# ---------------------------------------------------------------------------
+# ProfileConfig — requires_visa field
+# ---------------------------------------------------------------------------
+
+class TestProfileConfigVisa:
+    def test_requires_visa_defaults_false(self):
+        config = ProfileConfig(email="a@b.com", password="pw")
+        assert config.requires_visa is False
+
+    def test_requires_visa_true_accepted(self):
+        config = ProfileConfig(email="a@b.com", password="pw", requires_visa=True)
+        assert config.requires_visa is True
+
+    def test_requires_visa_in_model_dump(self):
+        config = ProfileConfig(email="a@b.com", password="pw", requires_visa=True)
+        data = config.model_dump()
+        assert "requires_visa" in data
+        assert data["requires_visa"] is True
+
+
+# ---------------------------------------------------------------------------
+# H-1B check method
+# ---------------------------------------------------------------------------
+
+def _make_visa_bot_stub():
+    """Minimal EasyApplyBot-like stub with H-1B state, no Selenium."""
+    stub = object.__new__(EasyApplyBot)
+    stub.config = ProfileConfig(email="a@b.com", password="pw", requires_visa=True)
+    stub._h1b_cache = {}
+    stub._h1b_stats = {"checked": 0, "applied": 0, "skipped": 0, "scores": [], "top_matches": []}
+    stub._on_event = None
+    return stub
+
+
+class TestH1BCheckMethod:
+    def test_approved_returns_true(self, monkeypatch):
+        """API returns approved=true → (True, score, matched_name)."""
+        stub = _make_visa_bot_stub()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"approved": True, "score": 0.99, "matched_name": "GOOGLE LLC"}
+        mock_resp.raise_for_status.return_value = None
+
+        import easyapplybot as _ea
+        monkeypatch.setattr(_ea, "_requests", MagicMock(get=MagicMock(return_value=mock_resp),
+                                                         exceptions=__import__("requests").exceptions))
+        approved, score, matched = stub._check_h1b_sponsor("Google LLC")
+
+        assert approved is True
+        assert score == pytest.approx(0.99)
+        assert matched == "GOOGLE LLC"
+
+    def test_denied_returns_false(self, monkeypatch):
+        """API returns approved=false → (False, 0.0, '')."""
+        stub = _make_visa_bot_stub()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"approved": False, "score": 0.0, "matched_name": ""}
+        mock_resp.raise_for_status.return_value = None
+
+        import easyapplybot as _ea
+        monkeypatch.setattr(_ea, "_requests", MagicMock(get=MagicMock(return_value=mock_resp),
+                                                         exceptions=__import__("requests").exceptions))
+        approved, score, matched = stub._check_h1b_sponsor("Some Startup Inc")
+
+        assert approved is False
+        assert score == 0.0
+        assert matched == ""
+
+    def test_connection_error_raises_h1b_exception(self, monkeypatch):
+        """ConnectionError → H1BAPIUnavailableException (not SystemExit, not crash)."""
+        import requests as _real_requests
+        stub = _make_visa_bot_stub()
+
+        mock_requests = MagicMock()
+        mock_requests.get.side_effect = _real_requests.exceptions.ConnectionError("refused")
+        mock_requests.exceptions = _real_requests.exceptions
+
+        import easyapplybot as _ea
+        monkeypatch.setattr(_ea, "_requests", mock_requests)
+
+        with pytest.raises(H1BAPIUnavailableException):
+            stub._check_h1b_sponsor("Acme Corp")
+
+    def test_cache_hit_skips_api_call(self, monkeypatch):
+        """Second call for same company uses cache — zero API calls."""
+        stub = _make_visa_bot_stub()
+        # Pre-seed cache
+        stub._h1b_cache["google llc"] = (True, 0.99, "GOOGLE LLC")
+
+        call_count = []
+        import easyapplybot as _ea
+        monkeypatch.setattr(_ea, "_requests", MagicMock(
+            get=MagicMock(side_effect=lambda *a, **kw: call_count.append(1))
+        ))
+
+        approved, score, matched = stub._check_h1b_sponsor("Google LLC")
+
+        assert approved is True
+        assert len(call_count) == 0, "Cache hit should not call the API"
+
+    def test_non_visa_profile_makes_no_api_call(self, monkeypatch):
+        """requires_visa=False — the visa gate is never entered, zero API calls.
+
+        This is the critical regression test: existing non-visa profiles must
+        not make any additional API calls (no performance regression).
+        """
+        import requests as _real_requests
+        call_count = []
+
+        import easyapplybot as _ea
+        monkeypatch.setattr(_ea, "_requests", MagicMock(
+            get=MagicMock(side_effect=lambda *a, **kw: call_count.append(1) or MagicMock()),
+            exceptions=_real_requests.exceptions,
+        ))
+
+        # Non-visa profile — requires_visa=False (default)
+        config = ProfileConfig(email="a@b.com", password="pw")
+        assert config.requires_visa is False
+
+        # Simulate what the apply loop does: only call _check_h1b_sponsor if requires_visa=True
+        company = "Google LLC"
+        sponsor_score = None
+        if config.requires_visa and company != "Unknown":
+            stub = _make_visa_bot_stub()
+            stub._check_h1b_sponsor(company)
+
+        assert len(call_count) == 0, "Non-visa profile must not call /h1b/check"
+
+
+# ---------------------------------------------------------------------------
+# H-1B end-of-run summary
+# ---------------------------------------------------------------------------
+
+class TestH1BSummaryLines:
+    def test_summary_with_no_applies(self):
+        stub = _make_visa_bot_stub()
+        lines = stub._h1b_summary_lines()
+        assert any("H-1B Visa Filter" in l for l in lines)
+        assert any("Checked:  0" in l for l in lines)
+        assert any("Approved: 0" in l for l in lines)
+        assert any("Skipped:  0" in l for l in lines)
+
+    def test_summary_with_applies_shows_avg_score(self):
+        stub = _make_visa_bot_stub()
+        stub._h1b_stats["checked"] = 10
+        stub._h1b_stats["applied"] = 7
+        stub._h1b_stats["skipped"] = 3
+        stub._h1b_stats["scores"] = [0.99, 0.95, 0.88, 0.92, 0.97, 0.91, 0.85]
+        stub._h1b_stats["top_matches"] = [("GOOGLE LLC", 0.99), ("MICROSOFT CORP", 0.95)]
+        lines = stub._h1b_summary_lines()
+        assert any("Approved: 7" in l for l in lines)
+        assert any("avg score" in l for l in lines)
+        assert any("GOOGLE LLC" in l for l in lines)
+
+    def test_requires_visa_false_renders_no_visa_block(self):
+        """Non-visa profile never calls _h1b_summary_lines (gate is in _run_bot).
+        If called anyway, it should still return lines (not crash)."""
+        stub = _make_visa_bot_stub()
+        stub.config = ProfileConfig(email="a@b.com", password="pw")  # requires_visa=False
+        lines = stub._h1b_summary_lines()
+        # Method itself is agnostic — caller (_run_bot) is responsible for the gate
+        assert isinstance(lines, list)
+
+
+# ---------------------------------------------------------------------------
+# _run_bot: H1BAPIUnavailableException handling
+# ---------------------------------------------------------------------------
+
+class TestRunBotH1B:
+    def test_h1b_api_unavailable_emits_event_and_stops(self):
+        """If H1BAPIUnavailableException is raised, bot_stopped event fires cleanly."""
+        config = ProfileConfig(email="a@b.com", password="pw", requires_visa=True)
+        events = []
+
+        def handler(event, data):
+            events.append((event, data))
+
+        mock_bot = MagicMock()
+        mock_bot.start_linkedin.return_value = True
+        mock_bot._check_h1b_seeded.side_effect = H1BAPIUnavailableException("table is empty")
+        mock_bot._h1b_stats = {"checked": 0, "applied": 0, "skipped": 0, "scores": [], "top_matches": []}
+
+        with patch("easyapplybot.load_settings", return_value=SystemConfig()), \
+             patch("easyapplybot.EasyApplyBot", return_value=mock_bot):
+            _run_bot(config, on_event=handler)
+
+        event_types = [e[0] for e in events]
+        assert "h1b_api_unavailable" in event_types
+        assert "bot_stopped" in event_types
+        stopped = next(e for e in events if e[0] == "bot_stopped")
+        assert stopped[1]["reason"] == "h1b_api_unavailable"

@@ -25,8 +25,10 @@ class LinkedInBot(JobBoardBot):
         self,
         config: "ProfileConfig",
         on_event: Optional[Callable] = None,
+        blacklist: Optional[List[str]] = None,
+        blacklist_titles: Optional[List[str]] = None,
     ) -> None:
-        super().__init__(config, on_event)
+        super().__init__(config, on_event, blacklist=blacklist, blacklist_titles=blacklist_titles)
         # _bot is created lazily inside run() so that Chrome doesn't launch
         # until this board is actually about to run.
         self._bot = None
@@ -35,7 +37,10 @@ class LinkedInBot(JobBoardBot):
         # Import here to avoid circular imports at module load time
         from easyapplybot import EasyApplyBot
 
-        self._bot = EasyApplyBot(self.config, on_event=self._on_event)
+        self._bot = EasyApplyBot(
+            self.config, on_event=self._on_event,
+            blacklist=self.blacklist, blacklist_titles=self.blacklist_titles,
+        )
 
         if not self._bot.start_linkedin(self.config.email, self.config.password):
             # EasyApplyBot already emitted login_failed via on_event

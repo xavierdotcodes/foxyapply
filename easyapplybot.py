@@ -42,6 +42,11 @@ from fake_useragent import UserAgent
 from openai import OpenAI
 from dotenv import load_dotenv
 
+try:
+    import requests as _requests
+except ImportError:
+    _requests = None  # type: ignore[assignment]
+
 from settings import _inject_ai_env, load_settings
 
 load_dotenv()  # load .env regardless of entry point (hiringfunnel.py, run_profiles_batch.py, etc.)
@@ -60,6 +65,15 @@ class DailyLimitReachedException(Exception):
 
 class ConsecutiveFailuresException(Exception):
     """Raised when the bot fails to apply to MAX_CONSECUTIVE_FAILURES jobs in a row."""
+    pass
+
+
+class H1BAPIUnavailableException(Exception):
+    """Raised when the pypes H-1B check API is unreachable during a visa-mode run.
+
+    The bot aborts on this exception rather than silently applying to all companies,
+    because falling back to unrestricted applications defeats the visa-filter guarantee.
+    """
     pass
 
 
@@ -83,6 +97,10 @@ class ProfileConfig(BaseModel):
     github_url: str = ""
     portfolio_url: str = ""
     job_boards: List[str] = ["linkedin"]
+    # H-1B visa filter: when True the bot only applies to companies with a
+    # documented H-1B sponsorship record (via GET /h1b/check on the pypes API).
+    # PYPES_BASE_URL env var controls the API base (default: https://api.pypes.dev).
+    requires_visa: bool = False
 
     @model_validator(mode='before')
     @classmethod
@@ -183,6 +201,19 @@ class EasyApplyBot:
         self.blacklist = [c.lower() for c in (blacklist or [])]
         self.blacklist_titles = [t.lower() for t in (blacklist_titles or [])]
 
+        # H-1B visa filter state (only active when config.requires_visa=True).
+        # _h1b_cache: per-session company lookup cache keyed by lowercase company name.
+        #   Value: (approved: bool, score: float, matched_name: str)
+        # _h1b_stats: counters accumulated during the session; printed in end-of-run summary.
+        self._h1b_cache: dict = {}
+        self._h1b_stats = {
+            "checked": 0,
+            "applied": 0,
+            "skipped": 0,
+            "scores": [],       # sponsor_score for each approved company applied to
+            "top_matches": [],  # (matched_name, score) for end-of-run summary
+        }
+
         # Setup Selenium driver
         self.browser = self._create_driver()
         self.wait = WebDriverWait(self.browser, 30)
@@ -194,6 +225,106 @@ class EasyApplyBot:
                 self._on_event(event_type, data or {})
             except Exception as e:
                 log.debug(f"on_event callback error: {e}")
+
+    # -----------------------------------------------------------------------
+    # H-1B visa filter
+    # -----------------------------------------------------------------------
+
+    def _check_h1b_seeded(self) -> None:
+        """Verify the H-1B employer table is populated before starting a visa-mode run.
+
+        Calls GET /h1b/health. Raises H1BAPIUnavailableException if:
+          - the API is unreachable
+          - employer_count == 0 (seed-h1b.ts was never run)
+
+        This guard prevents the silent failure where an empty table causes every
+        company to return approved=False, skipping 100% of jobs with no warning.
+        """
+        if _requests is None:
+            raise H1BAPIUnavailableException("'requests' library is not installed — cannot use visa mode")
+
+        base = os.environ.get("PYPES_BASE_URL", "https://api.pypes.dev")
+        secret = os.environ.get("CLIENT_SECRET", "")
+        headers = {"X-Pypes-Secret": secret} if secret else {}
+
+        try:
+            resp = _requests.get(f"{base}/h1b/health", headers=headers, timeout=5)
+            resp.raise_for_status()
+        except Exception as e:
+            raise H1BAPIUnavailableException(
+                f"[H-1B] Cannot reach pypes API at {base}: {e}\n"
+                f"Check PYPES_BASE_URL and CLIENT_SECRET env vars."
+            )
+
+        count = resp.json().get("employer_count", 0)
+        if count == 0:
+            raise H1BAPIUnavailableException(
+                "[H-1B] h1b_employers table is empty — run: bun run seed:h1b\n"
+                "Without H-1B data, visa-mode would silently skip every company."
+            )
+        log.info(f"[H-1B] Employer table verified: {count:,} rows loaded")
+
+    def _check_h1b_sponsor(self, company: str) -> tuple:
+        """Check if a company has an H-1B sponsorship record via the pypes API.
+
+        Returns (approved: bool, score: float, matched_name: str).
+
+        Uses an in-session cache keyed by lowercased company name to avoid
+        duplicate API calls when the same employer appears in multiple listings.
+
+        Raises H1BAPIUnavailableException on connection errors or non-2xx responses.
+        The bot aborts on this exception — do NOT silently fall back to applying
+        to all companies, as that defeats the visa-filter safety guarantee.
+        """
+        key = company.lower().strip()
+
+        if key in self._h1b_cache:
+            return self._h1b_cache[key]
+
+        base = os.environ.get("PYPES_BASE_URL", "https://api.pypes.dev")
+        secret = os.environ.get("CLIENT_SECRET", "")
+        headers = {"X-Pypes-Secret": secret} if secret else {}
+
+        try:
+            resp = _requests.get(
+                f"{base}/h1b/check",
+                params={"company": company},
+                headers=headers,
+                timeout=5,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            result = (data.get("approved", False), data.get("score", 0.0), data.get("matched_name", ""))
+        except _requests.exceptions.ConnectionError as e:
+            raise H1BAPIUnavailableException(
+                f"[H-1B] Cannot reach pypes API at {base}: {e}"
+            )
+        except Exception as e:
+            raise H1BAPIUnavailableException(
+                f"[H-1B] API error for {company!r}: {e}"
+            )
+
+        self._h1b_cache[key] = result
+        return result
+
+    def _h1b_summary_lines(self) -> list:
+        """Return the end-of-run H-1B visa filter summary as a list of lines."""
+        s = self._h1b_stats
+        lines = [
+            "",
+            "=== H-1B Visa Filter ===",
+            f"Checked:  {s['checked']} companies",
+            f"Approved: {s['applied']}  (avg score: {sum(s['scores']) / len(s['scores']):.2f})" if s['scores'] else f"Approved: {s['applied']}",
+            f"Skipped:  {s['skipped']}  (no USCIS record or score < 0.4)",
+        ]
+        if s["top_matches"]:
+            lines.append("")
+            lines.append("Top sponsors applied to:")
+            for name, score in sorted(s["top_matches"], key=lambda x: -x[1])[:5]:
+                lines.append(f"  {name:<30} {score:.2f}")
+        return lines
+
+    # -----------------------------------------------------------------------
 
     def _check_daily_limit(self) -> bool:
         """Return True if LinkedIn's daily submission limit notice is present."""
@@ -285,7 +416,6 @@ class EasyApplyBot:
 
     def applications_loop(self, position, location):
         count_application = 0
-        count_job = 0
         jobs_per_page = 0
         start_time = time.time()
 
@@ -328,17 +458,10 @@ class EasyApplyBot:
                 jobIDs = set(IDs)
                 self.total_seen += len(jobIDs)
 
-                if len(jobIDs) == 0 and len(IDs) > 23:
-                    jobs_per_page += 25
-                    count_job = 0
-                    self.avoid_lock()
-                    self.browser, jobs_per_page = self.next_jobs_page(position, location, jobs_per_page)
-
-                for i, jobID in enumerate(jobIDs):
+                for jobID in jobIDs:
                     if self.stopped:
                         return
 
-                    count_job += 1
                     if self.get_job_page(jobID) is None:
                         continue
 
@@ -361,6 +484,26 @@ class EasyApplyBot:
                         log.info(f"Skipping blacklisted title: {job_title}")
                         continue
 
+                    # H-1B visa filter: skip companies with no USCIS sponsorship record.
+                    # Only active when requires_visa=True. Raises H1BAPIUnavailableException
+                    # on connectivity failure — the outer loop propagates it to abort the run.
+                    sponsor_score: Optional[float] = None
+                    sponsor_matched_name: str = ""
+                    if self.config.requires_visa and company != "Unknown":
+                        approved, score, matched = self._check_h1b_sponsor(company)
+                        self._h1b_stats["checked"] += 1
+                        if not approved:
+                            self._h1b_stats["skipped"] += 1
+                            log.info(f"[H-1B SKIP] {company} — no sponsorship record")
+                            self._emit("h1b_skipped", {"company": company})
+                            continue
+                        self._h1b_stats["applied"] += 1
+                        self._h1b_stats["scores"].append(score)
+                        self._h1b_stats["top_matches"].append((matched, score))
+                        sponsor_score = score
+                        sponsor_matched_name = matched
+                        log.info(f"[H-1B OK] {company} → {matched} (score={score:.2f})")
+
                     self._emit("job_applying", {"job_id": str(jobID), "title": job_title, "company": company})
 
                     button = self.get_easy_apply_button()
@@ -374,7 +517,11 @@ class EasyApplyBot:
                             if result:
                                 self.applied_count += 1
                                 self.consecutive_fail_streak = 0
-                                self._emit("job_applied", {"job_id": str(jobID), "title": job_title, "company": company})
+                                event_data: dict = {"job_id": str(jobID), "title": job_title, "company": company}
+                                if sponsor_score is not None:
+                                    event_data["sponsor_score"] = sponsor_score
+                                    event_data["sponsor_matched_name"] = sponsor_matched_name
+                                self._emit("job_applied", event_data)
                             else:
                                 self.failed_count += 1
                                 self._emit("job_failed", {"job_id": str(jobID), "title": job_title, "error": "submit failed"})
@@ -416,12 +563,14 @@ class EasyApplyBot:
                         log.info(f"Time for a nap - see you in: {int(sleepTime / 60)} min")
                         time.sleep(sleepTime)
 
-                    if count_job == len(jobIDs):
-                        jobs_per_page += 25
-                        count_job = 0
-                        log.info("Going to next jobs page")
-                        self.avoid_lock()
-                        self.browser, jobs_per_page = self.next_jobs_page(position, location, jobs_per_page)
+                # Advance to next page after processing all jobs on this page.
+                # Unconditional so H1B-filtered or blacklisted jobs don't strand
+                # the browser on a detail page and trigger premature exit.
+                if jobIDs:
+                    jobs_per_page += 25
+                    log.info("Going to next jobs page")
+                    self.avoid_lock()
+                    self.browser, jobs_per_page = self.next_jobs_page(position, location, jobs_per_page)
 
             except DailyLimitReachedException:
                 raise
@@ -1014,6 +1163,9 @@ class EasyApplyBot:
             position + location + "&sortBy=DD&start=" + str(jobs_per_page))
         self.avoid_lock()
         self.load_page()
+        if self._check_daily_limit():
+            log.info("Daily application limit detected before search")
+            raise DailyLimitReachedException("Daily application limit reached")
         return (self.browser, jobs_per_page)
 
     def finish_apply(self) -> None:
@@ -1222,8 +1374,13 @@ def _run_bot(config: ProfileConfig, on_event: Optional[Callable[[str, dict], Non
             _applying = False
             return
 
+        # H-1B seeded check: verify the employer table is populated before
+        # starting a visa-mode run. Raises H1BAPIUnavailableException if not.
+        if config.requires_visa:
+            _bot._check_h1b_seeded()
+
         if on_event:
-            on_event("bot_started", {})
+            on_event("bot_started", {"requires_visa": config.requires_visa})
         _applying = True
 
         positions = [p for p in config.positions if p]
@@ -1238,6 +1395,8 @@ def _run_bot(config: ProfileConfig, on_event: Optional[Callable[[str, dict], Non
             return
 
         _bot.start_apply(positions, locations)
+        if on_event and config.requires_visa:
+            on_event("h1b_session_summary", {"lines": _bot._h1b_summary_lines(), "stats": dict(_bot._h1b_stats)})
         if on_event:
             on_event("bot_stopped", {"reason": "completed"})
     except DailyLimitReachedException:
@@ -1245,6 +1404,11 @@ def _run_bot(config: ProfileConfig, on_event: Optional[Callable[[str, dict], Non
         if on_event:
             on_event("daily_limit_reached", {"profile_email": config.email})
             on_event("bot_stopped", {"reason": "daily_limit_reached"})
+    except H1BAPIUnavailableException as e:
+        log.error(f"H-1B API unavailable for {config.email}: {e}")
+        if on_event:
+            on_event("h1b_api_unavailable", {"message": str(e)})
+            on_event("bot_stopped", {"reason": "h1b_api_unavailable"})
     except ConsecutiveFailuresException:
         log.warning(f"{EasyApplyBot.MAX_CONSECUTIVE_FAILURES} consecutive failures for {config.email}, moving to next profile")
         if on_event:
