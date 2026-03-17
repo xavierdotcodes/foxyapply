@@ -648,7 +648,7 @@ class EasyApplyBot:
             return self.desired_salary
         if 'experience' in label_lower and 'years' in label_lower:
             return self.years_of_experience
-        if 'available' in label_lower or 'start' in label_lower or 'notice' in label_lower:
+        if ('available' in label_lower or 'start' in label_lower or 'notice' in label_lower) and 'hour' not in label_lower:
             return '2 weeks'
         if any(keyword in label_lower for keyword in ['skill', 'technology', 'programming', 'language']):
             return 'Python, JavaScript, SQL'
@@ -663,9 +663,7 @@ class EasyApplyBot:
 
         if input_type == "text":
             llm_answer = self.get_llm_suggested_answer(label_text, input_type)
-            if llm_answer:
-                return llm_answer
-            return self.years_of_experience
+            return llm_answer
 
         return ''
 
@@ -985,16 +983,9 @@ class EasyApplyBot:
                     textarea.send_keys(appropriate_value)
                     log.info(f"Filled textarea '{label_text}' with value: {appropriate_value}")
                 else:
-                    textarea.clear()
-                    textarea.send_keys('3')
-                    log.info(f"Filled textarea '{label_text}' with default value: 3")
+                    log.warning(f"No answer generated for textarea '{label_text}', leaving blank")
             except Exception as e:
                 log.error(f"Error filling textarea field: {e}")
-                try:
-                    textarea.clear()
-                    textarea.send_keys('3')
-                except Exception:
-                    pass
 
     def load_page(self, sleep=1):
         scroll_page = 0
@@ -1065,12 +1056,18 @@ class EasyApplyBot:
             extra += f"\nGitHub: {self.github_url}"
         if self.portfolio_url:
             extra += f"\nPortfolio/website: {self.portfolio_url}"
+        numeric_fields = (
+            "Questions asking ONLY for a number (e.g. 'How many years of experience', 'Years of experience', "
+            "'Expected salary / hourly rate', 'How many hours per week') should be answered with ONLY a single "
+            f"numeric value and no other text: use {yoe} for years/experience questions, {salary} for salary/wage questions. "
+            "All other questions — including motivation, culture fit, or open-ended questions — require a full prose answer."
+        )
         return (
             f"You are {name}, a professional applying for jobs as a {positions_str} "
             f"based in {location_str} with {yoe} years of experience.{extra} "
-            f"Provide a short, succinct, professional answer for the following job application question: "
-            f"'{label_text}'. If it so much as mentions numerics such as experience or hourly wage, how long have you been.. etc... "
-            f"answer with ONLY a single numeric digit response and no additional text: {yoe} for years of experience, and {salary} for salary."
+            f"Answer the following job application question in 2-3 concise, professional sentences. "
+            f"{numeric_fields} "
+            f"Question: '{label_text}'"
         )
 
     def _llm_openai(self, prompt: str) -> str:
