@@ -1,0 +1,76 @@
+Metadata-Version: 2.4
+Name: hiringfunnel
+Version: 0.1.0
+Summary: LinkedIn Easy Apply bot with TUI profile management
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+Requires-Dist: selenium>=4.15.0
+Requires-Dist: beautifulsoup4>=4.12.0
+Requires-Dist: fake-useragent>=1.4.0
+Requires-Dist: openai>=1.6.0
+Requires-Dist: python-dotenv>=1.0.0
+Requires-Dist: pydantic>=2.5.0
+Requires-Dist: lxml>=4.9.0
+Requires-Dist: requests>=2.31.0
+Requires-Dist: questionary>=2.0.0
+Requires-Dist: rich>=13.0.0
+Requires-Dist: anthropic>=0.40.0
+Requires-Dist: google-generativeai>=0.8.0
+Requires-Dist: ollama>=0.4.0
+Provides-Extra: dev
+Requires-Dist: pytest>=7.0; extra == "dev"
+
+# HiringFunnel
+
+**Stop copy-pasting the same answers into 50 LinkedIn Easy Apply forms.**
+
+HiringFunnel runs a real browser, fills out applications with your info, and submits them while you do literally anything else.
+
+![Demo](demo.gif)
+
+## Quick Start
+
+```bash
+git clone https://github.com/pypesdev/hiring-funnel && cd hiring-funnel
+python3 -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+python3 hiringfunnel.py
+```
+
+## How It Works
+
+1. Add your LinkedIn credentials and basic info (phone, location, experience)
+2. Set target job titles and locations
+3. Select **Start** — watch it apply to jobs in a real browser window
+
+## Development
+
+### Prerequisites
+
+- **Python 3.10+**
+
+### Setup
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+### Run
+
+```bash
+python hiringfunnel.py
+```
+
+### Testing
+
+```bash
+pip install pytest
+.venv/bin/python -m pytest tests/ -v  
+```
+
+## License
+
+MIT
